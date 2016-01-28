@@ -1,5 +1,5 @@
 # SidistranMongoDriver
-A MongoDB java driver, with MVCC. So, you can use it to deal Transaction with your code
+A MongoDB java driver, with MVCC. So, you can use it to perform Transaction Transactional with your code
 
 
 ### **1. if your working db already has datas, you must do this:**
