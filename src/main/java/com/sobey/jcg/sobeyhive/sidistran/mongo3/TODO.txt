@@ -1,0 +1,6 @@
+看{@see com.sobey.jcg.sobeyhive.sidistran.mongo2.SidistranMongoClient}的注解。
+
+目前先实现老的处理方式，即Mongo.getDB这一条线来代理处理，因为Spring的data里面，依然采用的是DB方式
+
+
+由于3.0以后官方的API是以MongoClient.getDataBase这一条线来作为标准的，因此3.0暂时没实现。也许最终的底层实现是一致的
