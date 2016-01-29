@@ -21,8 +21,6 @@ class MonTxIDManager{
     private static String ID_GEN = "ID_Gen";
     private static String ID_TOGGLE = "ID_TOGGLE";
     private static String SEQ_FIELD = "seq";
-    private static String dummyField = "_dummy";
-    private static String min_tx_field = "min_tx";
     private static String max_tx_field = "max_tx";
 
     @SuppressWarnings("deprecation")

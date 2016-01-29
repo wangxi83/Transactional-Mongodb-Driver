@@ -90,27 +90,28 @@ public class SidistranDBCollection extends DBCollection {
                 new BasicDBObject(stat_f, 1),
                 new BasicDBObject("partialFilterExpression", new BasicDBObject(u_by_f, new BasicDBObject(QueryOperators.EXISTS, false))
                     .append(u_From_f, new BasicDBObject("$exists", false)))
+                    .append("background", 1)
             );
         }
 
         if(!txid_f_i){
             this.createIndex(
                 new BasicDBObject(txid_f, 1),
-                new BasicDBObject("partialFilterExpression", new BasicDBObject(stat_f, new BasicDBObject(QueryOperators.GT, Values.REMOVE_STAT)
-                    .append(QueryOperators.LT, Values.COMMITED_STAT)))
+                new BasicDBObject("partialFilterExpression", new BasicDBObject(stat_f, Values.INSERT_NEW_STAT))
+                    .append("background", 1)
             );
         }
 
         if(!u_by_f_i){
-            this.createIndex(new BasicDBObject(u_by_f, 1));
+            this.createIndex(new BasicDBObject(u_by_f, 1), new BasicDBObject("background", 1));
         }
 
         if(!u_From_f_i){
-            this.createIndex(new BasicDBObject(u_From_f, 1));
+            this.createIndex(new BasicDBObject(u_From_f, 1), new BasicDBObject("background", 1));
         }
 
         if(!db_time_f_i){
-            this.createIndex(new BasicDBObject(db_time_f, 1));
+            this.createIndex(new BasicDBObject(db_time_f, 1), new BasicDBObject("background", 1));
         }
     }
 
@@ -137,8 +138,25 @@ public class SidistranDBCollection extends DBCollection {
                 }
             }
             MongoTanscationManager.current().addTransactionTargetIfAbsent(this);
+        }else{
+            for (DBObject cur : documents) {
+                if (cur.get(Fields.ADDITIONAL_BODY) == null) {
+                    DBObject body = new BasicDBObject();
+                    //stat用于控制可见性
+                    body.put(Fields.STAT_FILED_NAME, Values.COMMITED_STAT);
+                    cur.put(Fields.ADDITIONAL_BODY, body);
+                }
+            }
         }
-        return super.insert(documents, insertOptions);
+
+        try {
+            return super.insert(documents, insertOptions);
+        }catch (Exception e){
+            if(MongoTanscationManager.hasTransaction()){
+                MongoTanscationManager.current().onError(e);
+            }
+            throw e;
+        }
     }
     //endregion
 
@@ -163,9 +181,14 @@ public class SidistranDBCollection extends DBCollection {
             //在sidistran环境下，删除变成逻辑删除
             //这里一定要使用this的，因为是版本事务控制
             //query会在update中处理
-            WriteResult result = this.update(query, new BasicDBObject(), false, true,
-                writeConcern, encoder, UpdateType.REMOVE);
-            return result;
+            try {
+                WriteResult result = this.update(query, new BasicDBObject(), false, true,
+                    writeConcern, encoder, UpdateType.REMOVE);
+                return result;
+            }catch (Exception e){
+                MongoTanscationManager.current().onError(e);
+                throw e;
+            }
         }else {
             //正常模式下，不能看到sidistran的数据
             commonQueryAdapt(query);
@@ -353,7 +376,7 @@ public class SidistranDBCollection extends DBCollection {
                         }
 
                         body = new BasicDBObject();
-                        int stat = updateType == UpdateType.UPDATE ? Values.INSERT_NEW_STAT : Values.REMOVE_STAT;
+                        int stat = updateType == UpdateType.UPDATE ? Values.INSERT_NEW_STAT : Values.NEED_TO_REMOVE;
                         dbObject.put(Fields.ADDITIONAL_BODY, body);
                         body.put(Fields.TXID_FILED_NAME, txid);
                         body.put(Fields.STAT_FILED_NAME, stat);
@@ -395,7 +418,12 @@ public class SidistranDBCollection extends DBCollection {
                 commonQueryAdapt(query);
                 return super.update(query, update, upsert, multi, aWriteConcern, encoder);
             }
-        }finally {
+        }catch (Exception e){
+            if(MongoTanscationManager.hasTransaction()){
+                MongoTanscationManager.current().onError(e);
+            }
+            throw e;
+        } finally {
             readWriteLock.readLock().unlock();
         }
     }
@@ -472,9 +500,9 @@ public class SidistranDBCollection extends DBCollection {
      *        {
      *          $or:[
      *            //当前事务或上一个事务创建的，且未修改的
-     *            {__s_.__s_stat: 2, __s_.__s_c_txid:{$lte: cur.txid},__s_.s_u_txid:{$exists:false},__s_._s_c_time:{$exists:false}},
+     *            {__s_.__s_stat: 2, __s_.__s_c_txid:{$lt: cur.txid},__s_.s_u_txid:{$exists:false},__s_._s_c_time:{$exists:false}},
      *            //当前事务或上一个事务创建后，被后续事务修改
-     *            {__s_.__s_stat: 2, __s_.__s_c_txid:{$lte: cur.txid},__s_.s_u_txid:{$gt:cur.txid},__s_._s_c_time:{$gt:cur.time}},
+     *            {__s_.__s_stat: 2, __s_.__s_c_txid:{$lt: cur.txid},__s_.s_u_txid:{$gt:cur.txid},__s_._s_c_time:{$gt:cur.time}},
      *            //由前面的事务创建，被前面的事务修改的
      *            {__s_.__s_stat: 2, __s_.__s_c_txid:{$lt: cur.txid},__s_.s_u_txid:{$lt: cur.txid},__s_._s_c_time:{$gt:cur.time}},
      *            //当前事务中的insert和update数据
@@ -498,11 +526,11 @@ public class SidistranDBCollection extends DBCollection {
         DBObject con = new BasicDBObject()
             .append("$or", new BasicDBObject[]{
                 new BasicDBObject(stat_f, Values.COMMITED_STAT)
-                    .append(txid_f, new BasicDBObject(QueryOperators.LTE, txid))
+                    .append(txid_f, new BasicDBObject(QueryOperators.LT, txid))
                     .append(u_by_f, new BasicDBObject(QueryOperators.EXISTS, false))
                     .append(db_time_f, new BasicDBObject(QueryOperators.EXISTS, false)),
                 new BasicDBObject(stat_f, Values.COMMITED_STAT)
-                    .append(txid_f, new BasicDBObject(QueryOperators.LTE, txid))
+                    .append(txid_f, new BasicDBObject(QueryOperators.LT, txid))
                     .append(u_by_f, new BasicDBObject(QueryOperators.GT, txid))
                     .append(db_time_f, new BasicDBObject(QueryOperators.GT, time)),
                 new BasicDBObject(stat_f, Values.COMMITED_STAT)
@@ -719,7 +747,7 @@ public class SidistranDBCollection extends DBCollection {
      */
     private DBObject getRemoveUpdateObj(){
         BasicDBObject update = new BasicDBObject("$set",
-            new BasicDBObject(stat_f, Values.REMOVE_STAT));
+            new BasicDBObject(stat_f, Values.NEED_TO_REMOVE));
 
         return update;
     }

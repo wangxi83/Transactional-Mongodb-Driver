@@ -98,6 +98,8 @@ class MongoTransaction{
                     DBCollection clt = itr.next();
                     clt.update(expireQuery, expire2Garbage, false, true, WriteConcern.ACKNOWLEDGED);
                     clt.update(insert2OKQuery, insert2OK, false, true, WriteConcern.ACKNOWLEDGED);
+                    //回收站处理
+                    MonTranshCleaner.getFrom(this.mongoClient).addToTransh(clt);
                 }
             }finally {
                 lock.writeLock().unlock();
@@ -126,6 +128,8 @@ class MongoTransaction{
                  itr.hasNext(); ) {
                 DBCollection clt = itr.next();
                 clt.update(rollbackQuery, expire2Garbage, false, true, WriteConcern.ACKNOWLEDGED);
+                //回收站处理
+                MonTranshCleaner.getFrom(this.mongoClient).addToTransh(clt);
             }
             collections.clear();
             DBCollection txClt = this.mongoClient.getDB(Constants.TRANSACTION_DB)

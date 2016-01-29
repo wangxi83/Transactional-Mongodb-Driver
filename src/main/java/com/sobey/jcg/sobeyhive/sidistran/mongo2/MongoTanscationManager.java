@@ -1,5 +1,7 @@
 package com.sobey.jcg.sobeyhive.sidistran.mongo2;
 
+import java.util.List;
+
 import com.mongodb.BasicDBObject;
 import com.mongodb.DBCollection;
 import com.mongodb.DBObject;
@@ -43,6 +45,7 @@ public final class MongoTanscationManager {
     private DBCollection txCollection;
     private MonTxIDManager txIDManager;
     private DBTime dbTime;
+    private MonTranshCleaner cleaner;
 
     //sidistran环境配置
 //    private SidistranConfig config;
@@ -52,7 +55,10 @@ public final class MongoTanscationManager {
     //用于保存本地事务
     private static ThreadLocal<MongoTransaction> transactionLocal = new ThreadLocal<MongoTransaction>();
     //用于其他地方判断当前上下文是否有事务
-    private static ThreadLocal<Boolean> transactionBoolLocal = new ThreadLocal<Boolean>();
+    private static ThreadLocal<Boolean> transactionBoolLocal = new ThreadLocal<>();
+
+    //字段名
+    private static String time_f = "time";
 
     /**
      * 获取本地事务
@@ -104,8 +110,25 @@ public final class MongoTanscationManager {
 
         this.txCollection = this.mongoClient.getDB(Constants.TRANSACTION_DB)
             .getCollection(Constants.TRANSACTION_TX_CLT);
+
+        boolean index_ok = false;
+        List<DBObject> indices = this.txCollection.getIndexInfo();
+        if(!indices.isEmpty()) {
+            for (DBObject dbObject : indices) {
+                DBObject key = (DBObject) dbObject.get("key");
+                if (key.get(time_f) != null && key.get(time_f).toString().equals("1")) {
+                    index_ok = true;
+                    break;
+                }
+            }
+        }
+        if(!index_ok){
+            this.txCollection.createIndex(new BasicDBObject(time_f, 1), new BasicDBObject("background", 1));
+        }
+
         this.txIDManager = MonTxIDManager.getFrom(this.mongoClient);
         this.dbTime = DBTime.getFrom(this.mongoClient);
+        this.cleaner = MonTranshCleaner.getFrom(this.mongoClient);
     }
 
     public void begin() {
@@ -187,9 +210,10 @@ public final class MongoTanscationManager {
      * 必须在关闭的时候调用该方法
      */
     public void close(){
-//        if(exportor!=null) {
-//            exportor.close();
-//        }
+        //if(exportor!=null) {
+        //    exportor.close();
+        //}
+        cleaner.close();
     }
 
 //    private void initialSidistran(){
@@ -213,7 +237,7 @@ public final class MongoTanscationManager {
     private MongoTransaction newTransactionIfAbsent(long txid){
         DBObject result = findTx(txid);
         MongoTransaction transaction =  new MongoTransaction(txid, this.mongoClient);
-        long time = ((Long)result.get("time")).longValue();
+        long time = ((Long)result.get(time_f)).longValue();
         transaction.setTx_time(time);
         return transaction;
     }
@@ -244,7 +268,7 @@ public final class MongoTanscationManager {
         long time = dbTime.nextTime();
         DBObject update =
             new BasicDBObject("$inc", new BasicDBObject("_dummy", 1l))
-                .append("$setOnInsert", new BasicDBObject("time", time));
+                .append("$setOnInsert", new BasicDBObject(time_f, time));
 
         DBObject result = this.txCollection.findAndModify(query, null, null, false, update, true, true);
         return result;

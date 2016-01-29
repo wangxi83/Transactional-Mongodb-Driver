@@ -30,13 +30,26 @@ class DBTime {
     }
 
     /**
-     * 获取下一个事务ID
+     * 获取下一个原子时间
      *
      * @return long
      */
     long nextTime() {
         DBObject dbObject = this.clt.findAndModify(new BasicDBObject("_id", ID_GEN),
             null, null, false, new BasicDBObject("$inc", new BasicDBObject(SEQ_FIELD, 1l)),
+            true, true);
+        return ((Long) dbObject.get(SEQ_FIELD)).longValue();
+    }
+
+    /**
+     * 获取当前的原子时间
+     * @return
+     */
+    long currentTime(){
+        DBObject dbObject = this.clt.findAndModify(new BasicDBObject("_id", ID_GEN),
+            null, null, false,
+            new BasicDBObject("$inc", new BasicDBObject("_dummy", 1l))
+                .append("$setOnInsert", new BasicDBObject(SEQ_FIELD, 1l)),
             true, true);
         return ((Long) dbObject.get(SEQ_FIELD)).longValue();
     }
