@@ -3,12 +3,16 @@ package com.sobey.jcg.sobeyhive.sidistran.mongo2;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 import org.apache.commons.lang.ArrayUtils;
 import org.apache.commons.lang.reflect.MethodUtils;
 import org.bson.BSONObject;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import com.mongodb.AggregationOptions;
 import com.mongodb.AggregationOutput;
@@ -38,16 +42,22 @@ import com.sobey.jcg.sobeyhive.sidistran.mongo2.ex.SidistranMongoCuccrentExcepti
  *
  * TODO:1.有没有更好的办法处理镜像？
  * TODO:2.删除逻辑还有待优化--如果tx1<tx2，那么，tx2的删除是允许覆盖tx1的处理的。目前是冲突报错
+ * TODO:3.Array的处理
  */
 public class SidistranDBCollection extends DBCollection {
+    private Logger logger = LoggerFactory.getLogger(SidistranDBCollection.class);
+
     private String stat_f = Fields.ADDITIONAL_BODY+"."+Fields.STAT_FILED_NAME;
     private String txid_f = Fields.ADDITIONAL_BODY+"."+Fields.TXID_FILED_NAME;
     private String u_by_f = Fields.ADDITIONAL_BODY+"."+Fields.UPDATEBY_TXID_NAME;
     private String u_From_f = Fields.ADDITIONAL_BODY+"."+Fields.UPDATE_FROM_NAME;
     private String db_time_f = Fields.ADDITIONAL_BODY+"."+Fields.GARBAGE_TIME_NAME;
 
+
     private boolean indexEnsured;
     private MongoReadWriteLock readWriteLock;
+
+    private List<String> uniqueIndice = new ArrayList<String>();
 
     SidistranDBCollection(DB database, String name) {
         super(database, name);
@@ -112,6 +122,42 @@ public class SidistranDBCollection extends DBCollection {
 
         if(!db_time_f_i){
             this.createIndex(new BasicDBObject(db_time_f, 1), new BasicDBObject("background", 1));
+        }
+
+        refreshUniqueFields(indices);
+    }
+
+    private void refreshUniqueFields(List<DBObject> indices){
+        for(DBObject index : indices) {
+            DBObject key = (DBObject) index.get("key");
+            //获取唯一键。在获取快照的时候需要使用
+            Boolean unique = (Boolean) index.get("unique");
+            if (unique != null && unique.booleanValue()) {
+//                List<String> temp = new ArrayList<String>();
+//                for (Iterator<String> itr_ = key.keySet().iterator();
+//                     itr_.hasNext(); ) {
+//                    temp.add(itr_.next());
+//                }
+//                String[] uniqueIndex = temp.toArray(new String[temp.size()]);
+//                if(uniqueIndex.length>1) {
+//                    Arrays.sort(uniqueIndex);
+//                }
+//                uniqueIndice.add(uniqueIndex[0].toLowerCase());
+
+                if(!key.containsField(Fields.UNIQUE_)){
+                    //如果唯一键里面不包含这个辅助字段，则加上
+                    BasicDBObject temp = new BasicDBObject();
+                    for (Iterator<String> itr_ = key.keySet().iterator();
+                         itr_.hasNext(); ) {
+                        temp.put(itr_.next(), 1);
+                    }
+                    temp.put(Fields.UNIQUE_, 1);
+
+                    this.dropIndex(index.get("name").toString());
+                    this.createIndex(temp,
+                        new BasicDBObject("unique", 1).append("name", index.get("name")).append("background", 1));
+                }
+            }
         }
     }
 
@@ -224,7 +270,7 @@ public class SidistranDBCollection extends DBCollection {
      * 同上
      */
     @Override
-    public long getCount(final DBObject query, DBObject projection, final long limit, final long skip,
+    public long getCount(DBObject query, DBObject projection, final long limit, final long skip,
                          final ReadPreference readPreference) {
         if (MongoTanscationManager.hasTransaction()) {
             sidistranQueryAdapt(query);
@@ -256,7 +302,7 @@ public class SidistranDBCollection extends DBCollection {
         return this.find(query, null);
     }
     @Override
-    public DBCursor find(final DBObject query, DBObject projection) {
+    public DBCursor find(DBObject query, DBObject projection) {
         if(MongoTanscationManager.hasTransaction()) {
             sidistranQueryAdapt(query);
         }else{
@@ -279,7 +325,7 @@ public class SidistranDBCollection extends DBCollection {
         }
     }
     @Override
-    public DBObject findOne(final DBObject query, DBObject projection, final DBObject sort,
+    public DBObject findOne(DBObject query, DBObject projection, final DBObject sort,
                             final ReadPreference readPreference) {
         if(MongoTanscationManager.hasTransaction()) {
             sidistranQueryAdapt(query);
@@ -299,7 +345,7 @@ public class SidistranDBCollection extends DBCollection {
         }
     }
     @Override
-    public List distinct(final String fieldName, final DBObject query, final ReadPreference readPreference) {
+    public List distinct(final String fieldName, DBObject query, final ReadPreference readPreference) {
         if(MongoTanscationManager.hasTransaction()) {
             sidistranQueryAdapt(query);
         }else{
@@ -333,6 +379,10 @@ public class SidistranDBCollection extends DBCollection {
             if(query instanceof CommitDBQuery){
                 return super.update(query, update, upsert, multi, aWriteConcern, encoder);
             }else if (MongoTanscationManager.hasTransaction()) {
+                if(logger.isDebugEnabled()){
+                    logger.debug("SidistranDBCollection.事务环境下."+(updateType==UpdateType.REMOVE?"remove":"update"));
+                }
+
                 if (upsert) {
                     throw new UnsupportedOperationException("Sidisitran环境下不能使用upsert=true");
                 }
@@ -348,13 +398,17 @@ public class SidistranDBCollection extends DBCollection {
 
                 //1.当前事务可见的“待处理”数据，也就是 当前事务.可见的.那些已提交的数据
                 DBObject query_4_common = new BasicDBObject(query.toMap());//clone一个出来
-                snapshotQueryOnSidistranUpdate(query_4_common);//这个查询保证[幂等性]
+                snapshotQuery_OnSidistranUpdate(query_4_common);//这个查询保证[幂等性]
 
                 //1.快照获取。复制一份数据版本的快照出来，这些数据指的是query覆盖的普通数据
                 DBCursor cursor = super.find(query_4_common);//调用super的查询，原汁原味
                 int findCount = cursor.count();
                 if (findCount > 0) {
-                    List<DBObject> list = new ArrayList<DBObject>();
+                    long time = System.currentTimeMillis();
+                    if(logger.isDebugEnabled()){
+                        logger.debug("SidistranDBCollection在事务环境下update，开始获取快照，快照数量："+findCount);
+                    }
+                    List<DBObject> list = new ArrayList<>();
                     while (cursor.hasNext()) {
                         DBObject dbObject = cursor.next();
                         //将update的数据复制一份出来进行处理
@@ -364,7 +418,7 @@ public class SidistranDBCollection extends DBCollection {
 
                         DBObject body = (DBObject) dbObject.get(Fields.ADDITIONAL_BODY);
                         if (body.get(Fields.UPDATEBY_TXID_NAME) != null) {
-                            long locker = ((Long) body.get(Fields.UPDATEBY_TXID_NAME)).longValue();
+                            long locker = (long) body.get(Fields.UPDATEBY_TXID_NAME);
                             if (locker != txid) {
                                 try {
                                     throw new SidistranMongoCuccrentException("could not serialize access due to concurrent update." +
@@ -381,6 +435,9 @@ public class SidistranDBCollection extends DBCollection {
                         body.put(Fields.TXID_FILED_NAME, txid);
                         body.put(Fields.STAT_FILED_NAME, stat);
                         body.put(Fields.UPDATE_FROM_NAME, dbObject.get("_id"));
+                        //这个字段用来避免唯一键冲突
+                        //@see this.refreshUniqueFields();
+                        dbObject.put(Fields.UNIQUE_, Values.UNIQUE_VAL_SNAPSHOT);
                         dbObject.removeField("_id");
                         list.add(dbObject);
                     }
@@ -393,7 +450,7 @@ public class SidistranDBCollection extends DBCollection {
                     //这里需要处理的，只能是被update的原始数据
                     DBObject update_4_common = this.getOriDataUpdateObj();//增加事务标识
                     query_4_common = new BasicDBObject(query.toMap());//clone一个出来
-                    lockQueryOnSidistranUpdate(query_4_common);
+                    findCommonDataQuery_OnSidistranUpdate(query_4_common);
                     //query_4_common标识的是common数据
                     WriteResult r = super.update(query_4_common, update_4_common, upsert, multi, aWriteConcern, encoder);
                     if (r.getN() != findCount) {
@@ -402,6 +459,10 @@ public class SidistranDBCollection extends DBCollection {
                         } finally {
                             proRollback(encoder);
                         }
+                    }
+
+                    if(logger.isDebugEnabled()){
+                        logger.debug("SidistranDBCollection在事务环境下update，快照处理完成，time="+(System.currentTimeMillis()-time));
                     }
                 }
 
@@ -462,7 +523,7 @@ public class SidistranDBCollection extends DBCollection {
     }
     //endregion
 
-    //region =--===================查询适配方法，史无前例的华丽分割线，老子弄的--------===========
+    //region =--===================查询适配方法，史无前例的华丽分割线--------===========
     /**
      * 在非sidistran的情况下，普通查询的内容：
      * 就是那些已经提交过的数据
@@ -475,9 +536,15 @@ public class SidistranDBCollection extends DBCollection {
      * @param query
      */
     private void commonQueryAdapt(DBObject query){
+        if(logger.isDebugEnabled()){
+            logger.debug("SidistranDBCollection【非事务】环境原始请求："+query);
+        }
         DBObject con = new BasicDBObject(stat_f, Values.COMMITED_STAT)
             .append(db_time_f, new BasicDBObject("$exists", false));
         queryAdapt(query, con);
+        if(logger.isDebugEnabled()){
+            logger.debug("SidistranDBCollection【非事务】环境处理后请求："+query);
+        }
     }
 
     /**
@@ -499,8 +566,8 @@ public class SidistranDBCollection extends DBCollection {
      * $and: [
      *        {
      *          $or:[
-     *            //当前事务或上一个事务创建的，且未修改的
-     *            {__s_.__s_stat: 2, __s_.__s_c_txid:{$lt: cur.txid},__s_.s_u_txid:{$exists:false},__s_._s_c_time:{$exists:false}},
+     *           //前序事务创建的，且未修改的
+     *            {__s_.__s_stat: 2, __s_.__s_c_txid:{$lt: cur.txid},__s_._s_c_time:{$exists:false}},
      *            //当前事务或上一个事务创建后，被后续事务修改
      *            {__s_.__s_stat: 2, __s_.__s_c_txid:{$lt: cur.txid},__s_.s_u_txid:{$gt:cur.txid},__s_._s_c_time:{$gt:cur.time}},
      *            //由前面的事务创建，被前面的事务修改的
@@ -517,17 +584,19 @@ public class SidistranDBCollection extends DBCollection {
      * @param query
      */
     private void sidistranQueryAdapt(DBObject query){
+        if(logger.isDebugEnabled()){
+            logger.debug("SidistranDBCollection在【事务环境】下原始请求："+query);
+        }
         long txid = MongoTanscationManager.txid_AtThisContext();
         long time = MongoTanscationManager.current().getTx_time();
 
 //        String updateByField = Fields.ADDITIONAL_BODY+"."+Fields.UPDATEBY_TXID_NAME
 //            +".txid_"+txid;
-
         DBObject con = new BasicDBObject()
             .append("$or", new BasicDBObject[]{
                 new BasicDBObject(stat_f, Values.COMMITED_STAT)
                     .append(txid_f, new BasicDBObject(QueryOperators.LT, txid))
-                    .append(u_by_f, new BasicDBObject(QueryOperators.EXISTS, false))
+                    .append(u_by_f, new BasicDBObject(QueryOperators.NE, txid))
                     .append(db_time_f, new BasicDBObject(QueryOperators.EXISTS, false)),
                 new BasicDBObject(stat_f, Values.COMMITED_STAT)
                     .append(txid_f, new BasicDBObject(QueryOperators.LT, txid))
@@ -538,13 +607,14 @@ public class SidistranDBCollection extends DBCollection {
                     .append(u_by_f, new BasicDBObject(QueryOperators.LT, txid))
                     .append(db_time_f, new BasicDBObject(QueryOperators.GT, time)),
                 new BasicDBObject(txid_f, txid)
-                    .append(stat_f,
-                        Values.INSERT_NEW_STAT
-//                      new BasicDBObject(QueryOperators.GT, Values.REMOVE_STAT)
-//                      .append(QueryOperators.LT, Values.COMMITED_STAT)
-                    )
+                    .append(stat_f, Values.INSERT_NEW_STAT)
             });
+
         queryAdapt(query, con);
+
+        if(logger.isDebugEnabled()){
+            logger.debug("SidistranDBCollection在【事务环境】下处理之后的请求："+query);
+        }
     }
 
     /**
@@ -563,10 +633,10 @@ public class SidistranDBCollection extends DBCollection {
      *        {
      *          __s_.__s_stat: 2，
      *          $or:[
-     *            //当前事务或上一个事务创建的，且未修改的
-     *            {__s_.__s_c_txid:{$lte: cur.txid},__s_.s_u_txid:{$exists:false},__s_._s_c_time:{$exists:false}},
+     *            //前序事务创建的，且未修改的
+     *            {__s_.__s_c_txid:{$lt: cur.txid},__s_._s_c_time:{$exists:false}},
      *            //当前事务或上一个事务创建后，被后续事务修改，但还没提交的
-     *            {__s_.__s_c_txid:{$lte: cur.txid},__s_.s_u_txid:{$gt:cur.txid},__s_._s_c_time:{$gt:cur.time}},
+     *            {__s_.__s_c_txid:{$lt: cur.txid},__s_.s_u_txid:{$gt:cur.txid},__s_._s_c_time:{$gt:cur.time}},
      *            //由前面的事务创建，并且前面的事务还在修改，但还没提交的
      *            {__s_.__s_c_txid:{$lt: cur.txid},__s_.s_u_txid:{$lt: cur.txid},__s_._s_c_time:{$gt:cur.time}},
      *          ]
@@ -575,16 +645,16 @@ public class SidistranDBCollection extends DBCollection {
      *
      * @param query
      */
-    private void snapshotQueryOnSidistranUpdate(DBObject query){
+    private void snapshotQuery_OnSidistranUpdate(DBObject query){
         long txid = MongoTanscationManager.txid_AtThisContext();
         long time = MongoTanscationManager.current().getTx_time();
 
         DBObject con = new BasicDBObject(stat_f, Values.COMMITED_STAT)
             .append("$or", new BasicDBObject[]{
-                new BasicDBObject(txid_f, new BasicDBObject(QueryOperators.LTE, txid))
-                    .append(u_by_f, new BasicDBObject(QueryOperators.EXISTS, false))
+                new BasicDBObject(txid_f, new BasicDBObject(QueryOperators.LT, txid))
+                    .append(u_by_f, new BasicDBObject(QueryOperators.NE, txid))
                     .append(db_time_f, new BasicDBObject(QueryOperators.EXISTS, false)),
-                new BasicDBObject(txid_f, new BasicDBObject(QueryOperators.LTE, txid))
+                new BasicDBObject(txid_f, new BasicDBObject(QueryOperators.LT, txid))
                     .append(u_by_f, new BasicDBObject(QueryOperators.GT, txid))
                     .append(db_time_f, new BasicDBObject(QueryOperators.GT, time)),
                 new BasicDBObject(txid_f, new BasicDBObject(QueryOperators.LT, txid))
@@ -606,30 +676,29 @@ public class SidistranDBCollection extends DBCollection {
      *
      * $and: [
      *        {
-     *          __s_.__s_stat: 2, __s_.__s_c_txid:{$lte: cur.txid},__s_.s_u_txid:{$exists:false},__s_._s_c_time:{$exists:false}
+     *          __s_.__s_stat: 2, __s_.__s_c_txid:{$lt: cur.txid},__s_.__s_u_txid:{$exists:false},__s_._s_c_time:{$exists:false}
      *        }
      * ]
      *
      * @param query
      */
-    private void lockQueryOnSidistranUpdate(DBObject query){
+    private void findCommonDataQuery_OnSidistranUpdate(DBObject query){
         long txid = MongoTanscationManager.txid_AtThisContext();
 
         DBObject con = new BasicDBObject(stat_f, Values.COMMITED_STAT)
-                    .append(txid_f, new BasicDBObject(QueryOperators.LTE, txid))
+                    .append(txid_f, new BasicDBObject(QueryOperators.LT, txid))
             .append(u_by_f, new BasicDBObject(QueryOperators.EXISTS, false))
             .append(db_time_f, new BasicDBObject(QueryOperators.EXISTS, false));
         queryAdapt(query, con);
     }
 
 
-    //主要的逻辑点在于：query的第一层，可能存在一个and，可能存在一个or，也可能两个都不存在。
+    //主要的逻辑点在于：query的第一层，可能存在一个and，也可能不存在。
     private void queryAdapt(DBObject query, DBObject con){
-        //这里修改条件，只看query这个json的【最外层】，其他里面不管是否有and还是or，都与此无关。
+        //这里修改条件，只看query这个json的【最外层】，其他里面不管是否有and，都与此无关。
         if(query.containsField("$and")){
-            //最外层没得or，但是有个and
             Object[] con_in_and = (Object[])query.get("$and");
-            //看看这个and里面是否已经有一个or
+            //看看这个and里面是否已经包含该条件
             int i = Arrays.binarySearch(con_in_and, con, conditin_in_and_Finder);
             if(i<0){
                 //不存在,则在and里面加一个就行了。
@@ -638,10 +707,9 @@ public class SidistranDBCollection extends DBCollection {
                 query.put("$and", con_in_and);
             }
         }else{
-            //没得or，没得and,那就加一个and到条件冲
+            //没得and,那就加一个and到条件冲
             query.put("$and", new DBObject[]{con});
         }
-//        System.out.println(query);
     }
 
     //queryAdapt的辅助处理。主要是处理or。对于每一个or因子，需要增加一个and
@@ -685,6 +753,9 @@ public class SidistranDBCollection extends DBCollection {
     private void projectionAdapt(DBObject projection){
         if(!projection.containsField(Fields.ADDITIONAL_BODY)){
             projection.put(Fields.ADDITIONAL_BODY, false);
+        }
+        if(!projection.containsField(Fields.UNIQUE_)){
+            projection.put(Fields.UNIQUE_, false);
         }
     }
 
@@ -767,7 +838,11 @@ public class SidistranDBCollection extends DBCollection {
         //2.标记所有的临时数据为需要被删除
         super.update(
             new BasicDBObject(txid_f, txid).append(stat_f, new BasicDBObject("$ne", Values.COMMITED_STAT)),
-            new BasicDBObject("$set", new BasicDBObject(stat_f, Values.NEED_TO_REMOVE)),
+            new BasicDBObject(
+                "$set",
+                new BasicDBObject(stat_f, Values.NEED_TO_REMOVE)
+                .append(Fields.UNIQUE_, UUID.randomUUID().toString()) //避免出现垃圾数据的唯一键冲突
+            ),
             false, true, WriteConcern.ACKNOWLEDGED, dbEncoder
         );
     }

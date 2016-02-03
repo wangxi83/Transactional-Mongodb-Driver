@@ -11,6 +11,7 @@ public interface Constants {
         static final String UPDATEBY_TXID_NAME = "__s_u_txid";
         static final String UPDATE_FROM_NAME = "__s_u_from";
         static final String GARBAGE_TIME_NAME = "__s_g_time";//成为垃圾的时间
+        static final String UNIQUE_ = "unique_";//修改唯一键的字段
     }
 
     static interface Values{
@@ -20,6 +21,7 @@ public interface Constants {
 //        static final int UPDATE_STAT = 1; //更新的
 
         static final int NEED_TO_REMOVE = -100;//需要被清理的
+        static final String UNIQUE_VAL_SNAPSHOT = "1";
     }
 
     static String TRANSACTION_DB = "transaction";

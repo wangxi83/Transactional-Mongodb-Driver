@@ -9,6 +9,11 @@ A MongoDB java driver, with MVCC. So, you can use it to perform Transaction Tran
  very important
   1）your connection must can see the DB named “transaction”
   2）the user with credential must can readWrite DB-“transaction”
+  3）if your collection already has an uniqueindex.you must:
+     fisrt drop it,
+     then recreate it but add a field named "unique_" to the index.
+     i.e.: consider Collection A has  uniqueindex that name="test", field="aaaa".
+           this index should be update to name="test", field="aaaa, unique_".
 ```
 
 ### **2.config SidistranMongoClient int Spring**

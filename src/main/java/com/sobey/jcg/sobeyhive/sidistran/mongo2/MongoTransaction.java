@@ -2,6 +2,7 @@ package com.sobey.jcg.sobeyhive.sidistran.mongo2;
 
 import java.util.Iterator;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
@@ -78,12 +79,19 @@ class MongoTransaction{
                 //并且，设置__s_.__s_c_txid为当前可见的最大事务id
                 //这样一来，新数据就不会被还没有提交的事务看见 @see SidistranDBCollection.sidistranQueryAdapt()
                 long maxtxid = MonTxIDManager.getFrom(mongoClient).toggleMaxTxID(txid);
+
                 DBObject insert2OKQuery = new CommitDBQuery(stat_f, Values.INSERT_NEW_STAT)
-                    .append(txid_f, txid);
+                                                    .append(txid_f, txid);
                 DBObject insert2OK =
-                    new BasicDBObject("$set", new BasicDBObject(stat_f, Values.COMMITED_STAT)
-                        .append(txid_f, maxtxid))
-                        .append("$unset", new BasicDBObject(ufrom_f, ""));
+                    new BasicDBObject(
+                        "$set",
+                        new BasicDBObject(stat_f, Values.COMMITED_STAT)
+                        .append(txid_f, maxtxid)
+                    ).append(
+                        "$unset",
+                        new BasicDBObject(ufrom_f, "")
+                        .append(Fields.UNIQUE_, "")
+                    );
 
                 //把那些被当前事务修改的数据
                 //更新其“变成垃圾的的日期”，这样，最新的事务就不能看到这些数据，
@@ -91,7 +99,11 @@ class MongoTransaction{
                 DBObject expireQuery = new CommitDBQuery(stat_f, Values.COMMITED_STAT)
                     .append(uby_f, txid);
                 long time = DBTime.getFrom(mongoClient).nextTime();
-                DBObject expire2Garbage = new BasicDBObject("$set", new BasicDBObject(time_f, time));
+                DBObject expire2Garbage = new BasicDBObject(
+                    "$set",
+                    new BasicDBObject(time_f, time)
+                    .append(Fields.UNIQUE_, UUID.randomUUID().toString()) //避免出现垃圾数据的唯一键冲突
+                );
 
                 for (Iterator<DBCollection> itr = collections.values().iterator();
                      itr.hasNext(); ) {

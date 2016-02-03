@@ -5,6 +5,11 @@ db.XX.update({}, {$set:{__s_.__s_stat:2}})
  very important
   1）your connection must can see the DB named “transaction”
   2）the user with credential must can readWrite DB-“transaction”
+  3）if your collection has unique index, 
+     i.e. 
+     Collection A has index {name=test_unique, field=test}
+     you must set index name=test_unique to {name=test_unique, field=[test, unique_]}
+     it means: any unique index already exists, must modify it that add a field named "unique_" to the index
   
   
   

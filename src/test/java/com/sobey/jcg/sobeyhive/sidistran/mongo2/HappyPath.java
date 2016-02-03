@@ -30,42 +30,42 @@ public class HappyPath {
         SidistranMongoClient mongo = new SidistranMongoClient(serverAddress, credentials);
         final MongoTanscationManager tanscationManager = new MongoTanscationManager(mongo);
 
-//        new Thread(){
-//            public void run(){
-//                SidistranMongoClient mongo = new SidistranMongoClient(serverAddress, credentials);
-//                DB db = mongo.getDB("test");
-//                DBCollection dbCollection = db.getCollection("student");
-//
-//                int i=0;
-//                while(true){
-//                    DBObject dbObject =  new BasicDBObject();
-//                    System.out.println("第"+i+"次查询");
-//                    DBCursor objects = dbCollection.find(dbObject);
-//                    if(objects.count()>0) {
-//                        while (objects.hasNext()) {
-//                            System.out.println(objects.next());
-//                        }
-////                        break;
-//                    }
-//                    i++;
-//                    try{Thread.sleep(1000l);}catch (Exception e){}
-//                }
-//
-//            }
-//        }.start();
+        new Thread(){
+            public void run(){
+                SidistranMongoClient mongo = new SidistranMongoClient(serverAddress, credentials);
+                DB db = mongo.getDB("test");
+                DBCollection dbCollection = db.getCollection("student");
+
+                int i=0;
+                while(true){
+                    DBObject dbObject =  new BasicDBObject();
+                    System.out.println("第"+i+"次查询");
+                    DBCursor objects = dbCollection.find(dbObject);
+                    if(objects.count()>0) {
+                        while (objects.hasNext()) {
+                            System.out.println(objects.next());
+                        }
+//                        break;
+                    }
+                    i++;
+                    try{Thread.sleep(1000l);}catch (Exception e){}
+                }
+
+            }
+        }.start();
 
 
 
-        System.out.println("事务 开始");
-        tanscationManager.begin();
-        insert(mongo);
-        System.out.println("未提交事务");
-        find(mongo);
-//        if(true){
-//            tanscationManager.rollback();
-//        }
-        tanscationManager.commit();
-        System.out.println("事务提交");
+//        System.out.println("事务 开始");
+//        tanscationManager.begin();
+//        insert(mongo);
+//        System.out.println("未提交事务");
+//        find(mongo);
+////        if(true){
+////            tanscationManager.rollback();
+////        }
+//        tanscationManager.commit();
+//        System.out.println("事务提交");
 
 
 //        System.out.println("事务 开始");
@@ -79,19 +79,21 @@ public class HappyPath {
 ////        }
 //        tanscationManager.commit();
 //        System.out.println("事务提交");
-//
-//
-//        System.out.println("事务 开始");
-//        tanscationManager.begin();
-//        find(mongo);
-//        remove(mongo);
-//        System.out.println("未提交事务");
-//        find(mongo);
-////        if(true){
-////            tanscationManager.rollback();
-////        }
-//        tanscationManager.commit();
-//        System.out.println("事务提交");
+
+
+        System.out.println("事务 开始");
+        tanscationManager.begin();
+        find(mongo);
+        remove(mongo);
+        System.out.println("未提交事务");
+        find(mongo);
+//        if(true){
+//            tanscationManager.rollback();
+//        }
+        tanscationManager.commit();
+        System.out.println("事务提交");
+
+        tanscationManager.close();
         mongo.close();
     }
 
