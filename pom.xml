@@ -4,7 +4,7 @@
     <groupId>com.sobey.jcg</groupId>
     <artifactId>sobeyhive-sidistrandriver-mongo</artifactId>
     <packaging>jar</packaging>
-    <version>1.0-beta</version>
+    <version>1.0</version>
     <name>sobeyhive-sidistrandriver-mongo</name>
     <url>http://maven.apache.org</url>
 
