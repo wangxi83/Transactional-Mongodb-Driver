@@ -3,7 +3,7 @@ A MongoDB java driver, with MVCC. So, you can use it to perform Transaction Tran
 
 
 ### **1. if your working db already has datas, you must do this:**
-`db.XX.update({}, {$set:{__s_.__s_stat:2}})`
+`db.XX.update({}, {$set:{__s_.__s_stat: 2, __s_.__s_g_time:Long.MAX_VALUE,__s_.__s_c_txid:-1l,__s_.__s_u_txid:-1l})`
 
 ```
  very important
