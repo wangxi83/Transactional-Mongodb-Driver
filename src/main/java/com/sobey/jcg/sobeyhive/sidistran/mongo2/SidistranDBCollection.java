@@ -50,7 +50,6 @@ public class SidistranDBCollection extends DBCollection {
     private String stat_f = Fields.ADDITIONAL_BODY+"."+Fields.STAT_FILED_NAME;
     private String txid_f = Fields.ADDITIONAL_BODY+"."+Fields.TXID_FILED_NAME;
     private String u_by_f = Fields.ADDITIONAL_BODY+"."+Fields.UPDATEBY_TXID_NAME;
-    private String u_From_f = Fields.ADDITIONAL_BODY+"."+Fields.UPDATE_FROM_NAME;
     private String db_time_f = Fields.ADDITIONAL_BODY+"."+Fields.GARBAGE_TIME_NAME;
 
 
@@ -62,69 +61,91 @@ public class SidistranDBCollection extends DBCollection {
     SidistranDBCollection(DB database, String name) {
         super(database, name);
         if(!indexEnsured) {
-            assureIndex();
+            List<DBObject> indices = this.getIndexInfo();
+            assureIndex(indices);
+            refreshUniqueFields(indices);
             indexEnsured = true;
         }
         readWriteLock = MongoReadWriteLock.getLock((MongoClient) database.getMongo());
     }
 
-    private void assureIndex(){
-        boolean stat_f_i = false;
-        boolean txid_f_i = false;
-        boolean u_by_f_i = false;
-        boolean u_From_f_i = false;
-        boolean db_time_f_i = false;
+    private void assureIndex(List<DBObject> indices){
+        boolean commonqueryIndex = false; //@see this.commonQueryAdatp()
+        boolean sidistranQueryIndex_1 = false; //@see this.sidistranQueryAdapt(), MongoTransaction.commit()
+        boolean sidistranQueryIndex_2 = false; //@see this.sidistranQueryAdapt(), MongoTransaction.rollback()
+        boolean findCommonOnUpdateQueryIndex = false; //@see this.findCommonDataQuery_OnSidistranUpdate()
+        boolean expireQueryIndex = false; //@see MongoTransaction.commit()
+        boolean statIndex = false; //@see MonTranshCleaner.doClean()
+        boolean gtimeIndex = false; //@see MonTranshCleaner.doClean()
 
-        List<DBObject> indices = this.getIndexInfo();
         for(DBObject dbObject : indices){
-            DBObject key = (DBObject)dbObject.get("key");
-            if(key.get(stat_f)!=null&&key.get(stat_f).toString().equals("1")){
-                stat_f_i = true;
+            String name = (String)dbObject.get("name");
+            if(name.equals(Fields.STAT_FILED_NAME+Fields.GARBAGE_TIME_NAME)){ //"__s_stat__s_g_time"
+                commonqueryIndex = true;
             }
-            if(key.get(txid_f)!=null&&key.get(txid_f).toString().equals("1")){
-                txid_f_i = true;
+            if(name.equals(
+                Fields.STAT_FILED_NAME+Fields.TXID_FILED_NAME
+                +Fields.UPDATEBY_TXID_NAME+Fields.GARBAGE_TIME_NAME)
+                ){ //"__s_stat__s_c_txid__s_u_txid__s_g_time"
+                sidistranQueryIndex_1 = true;
             }
-            if(key.get(u_by_f)!=null&&key.get(u_by_f).toString().equals("1")){
-                u_by_f_i = true;
+            if(name.equals(Fields.TXID_FILED_NAME+Fields.STAT_FILED_NAME)){ //"__s_c_txid__s_stat"
+                sidistranQueryIndex_2 = true;
             }
-            if(key.get(u_From_f)!=null&&key.get(u_From_f).toString().equals("1")){
-                u_From_f_i = true;
+            if(name.equals(Fields.STAT_FILED_NAME+Fields.TXID_FILED_NAME+Fields.UPDATEBY_TXID_NAME)){ //"__s_stat__s_c_txid__s_u_txid"
+                findCommonOnUpdateQueryIndex = true;
             }
-            if(key.get(db_time_f)!=null&&key.get(db_time_f).toString().equals("1")){
-                db_time_f_i = true;
+            if(name.equals(Fields.STAT_FILED_NAME+Fields.UPDATEBY_TXID_NAME)){ //"__s_stat__s_u_txid"
+                expireQueryIndex = true;
+            }
+            if(name.equals(Fields.STAT_FILED_NAME)){//"__s_stat"
+                expireQueryIndex = true;
+            }
+            if(name.equals(Fields.GARBAGE_TIME_NAME)){ //"__s_g_time"
+                gtimeIndex = true;
             }
         }
 
-        if(!stat_f_i){
+        if(!commonqueryIndex){
+            this.createIndex(new BasicDBObject(Fields.STAT_FILED_NAME, 1).append(Fields.GARBAGE_TIME_NAME, 1)
+            , new BasicDBObject("background", 1).append("name", Fields.STAT_FILED_NAME+Fields.GARBAGE_TIME_NAME));
+        }
+        if(!sidistranQueryIndex_1){
             this.createIndex(
-                new BasicDBObject(stat_f, 1),
-                new BasicDBObject("partialFilterExpression", new BasicDBObject(u_by_f, new BasicDBObject(QueryOperators.EXISTS, false))
-                    .append(u_From_f, new BasicDBObject("$exists", false)))
-                    .append("background", 1)
-            );
+                new BasicDBObject(Fields.STAT_FILED_NAME, 1)
+                .append(Fields.TXID_FILED_NAME, 1)
+                .append(Fields.UPDATEBY_TXID_NAME, 1)
+                .append(Fields.GARBAGE_TIME_NAME, 1)
+                ,
+                new BasicDBObject("background", 1)
+                .append("name", Fields.STAT_FILED_NAME + Fields.TXID_FILED_NAME
+                    + Fields.UPDATEBY_TXID_NAME + Fields.GARBAGE_TIME_NAME));
         }
-
-        if(!txid_f_i){
+        if(!sidistranQueryIndex_2){
+            this.createIndex(new BasicDBObject(Fields.TXID_FILED_NAME, 1).append(Fields.STAT_FILED_NAME, 1)
+                , new BasicDBObject("background", 1).append("name", Fields.TXID_FILED_NAME+Fields.STAT_FILED_NAME));
+        }
+        if(!findCommonOnUpdateQueryIndex){
             this.createIndex(
-                new BasicDBObject(txid_f, 1),
-                new BasicDBObject("partialFilterExpression", new BasicDBObject(stat_f, Values.INSERT_NEW_STAT))
-                    .append("background", 1)
-            );
+                new BasicDBObject(Fields.STAT_FILED_NAME, 1)
+                    .append(Fields.TXID_FILED_NAME, 1)
+                    .append(Fields.UPDATEBY_TXID_NAME, 1)
+                ,
+                new BasicDBObject("background", 1)
+                    .append("name", Fields.STAT_FILED_NAME + Fields.TXID_FILED_NAME + Fields.UPDATEBY_TXID_NAME));
         }
-
-        if(!u_by_f_i){
-            this.createIndex(new BasicDBObject(u_by_f, 1), new BasicDBObject("background", 1));
+        if(!expireQueryIndex){
+            this.createIndex(new BasicDBObject(Fields.STAT_FILED_NAME, 1).append(Fields.UPDATEBY_TXID_NAME, 1)
+                , new BasicDBObject("background", 1).append("name", Fields.STAT_FILED_NAME+Fields.UPDATEBY_TXID_NAME));
         }
-
-        if(!u_From_f_i){
-            this.createIndex(new BasicDBObject(u_From_f, 1), new BasicDBObject("background", 1));
+        if(!statIndex){
+            this.createIndex(new BasicDBObject(Fields.STAT_FILED_NAME, 1)
+                , new BasicDBObject("background", 1).append("name", Fields.STAT_FILED_NAME));
         }
-
-        if(!db_time_f_i){
-            this.createIndex(new BasicDBObject(db_time_f, 1), new BasicDBObject("background", 1));
+        if(!gtimeIndex){
+            this.createIndex(new BasicDBObject(Fields.GARBAGE_TIME_NAME, 1)
+                , new BasicDBObject("background", 1).append("name", Fields.GARBAGE_TIME_NAME));
         }
-
-        refreshUniqueFields(indices);
     }
 
     private void refreshUniqueFields(List<DBObject> indices){
@@ -190,6 +211,7 @@ public class SidistranDBCollection extends DBCollection {
                     DBObject body = new BasicDBObject();
                     //stat用于控制可见性
                     body.put(Fields.STAT_FILED_NAME, Values.COMMITED_STAT);
+                    body.put(db_time_f, Long.MAX_VALUE);
                     cur.put(Fields.ADDITIONAL_BODY, body);
                 }
             }
@@ -419,7 +441,7 @@ public class SidistranDBCollection extends DBCollection {
                         DBObject body = (DBObject) dbObject.get(Fields.ADDITIONAL_BODY);
                         if (body.get(Fields.UPDATEBY_TXID_NAME) != null) {
                             long locker = (long) body.get(Fields.UPDATEBY_TXID_NAME);
-                            if (locker != txid) {
+                            if (locker != txid&&locker!=-1l) {
                                 try {
                                     throw new SidistranMongoCuccrentException("could not serialize access due to concurrent update." +
                                         " cur.txid=" + txid + " , _id=" + dbObject.get("_id") + ", locker=" + body.get(Fields.UPDATEBY_TXID_NAME));
@@ -527,10 +549,12 @@ public class SidistranDBCollection extends DBCollection {
     /**
      * 在非sidistran的情况下，普通查询的内容：
      * 就是那些已经提交过的数据
+     * @see com.sobey.jcg.sobeyhive.sidistran.mongo2.MongoTransaction commit()
+     * 提交的时候，会把“成为垃圾的时间”设置成Long.MAX_VALUE，即表示永远不是垃圾
      *
      * $and: [
      *       {
-     *          __s_.__s_stat: 2, __s_._s_c_time:{$exists:false}
+     *          __s_.__s_stat: 2, __s_.__s_g_time:Long.MAX_VALUE
      *       }
      * ]
      * @param query
@@ -540,7 +564,7 @@ public class SidistranDBCollection extends DBCollection {
             logger.debug("SidistranDBCollection【非事务】环境原始请求："+query);
         }
         DBObject con = new BasicDBObject(stat_f, Values.COMMITED_STAT)
-            .append(db_time_f, new BasicDBObject("$exists", false));
+            .append(db_time_f, Long.MAX_VALUE);
         queryAdapt(query, con);
         if(logger.isDebugEnabled()){
             logger.debug("SidistranDBCollection【非事务】环境处理后请求："+query);
@@ -578,7 +602,20 @@ public class SidistranDBCollection extends DBCollection {
      *        }
      * ]
      *
-     * __s_u_txid的两个“不等于”的条件，决定了被txid处理的数据，每一次查询不会被查出来
+     * ----->
+     * 上述条件可以简化为：
+     *  $and: [
+     *        {
+     *          $or:[
+     *            //被其他事务创建的，且未提交修改的
+     *            {__s_.__s_stat: 2, __s_.__s_c_txid:{$lt: cur.txid},__s_.__s_u_txid:{$ne:cur.txid},__s_.__s_c_time:{$gt:cur.time}},
+     *            //当前事务中的insert和update数据
+     *            {__s_.__s_c_txid: cur.txid, __s_.__s_stat:0}
+     *          ]
+     *        }
+     * ]
+     *
+     * __s_u_txid的“不等于”的条件，决定了被txid处理的数据，每一次查询不会被查出来
      * 保证了幂等性
      *
      * @param query
@@ -592,22 +629,32 @@ public class SidistranDBCollection extends DBCollection {
 
 //        String updateByField = Fields.ADDITIONAL_BODY+"."+Fields.UPDATEBY_TXID_NAME
 //            +".txid_"+txid;
+//        DBObject con = new BasicDBObject()
+//            .append("$or", new BasicDBObject[]{
+//                new BasicDBObject(stat_f, Values.COMMITED_STAT)
+//                    .append(txid_f, new BasicDBObject(QueryOperators.LT, txid))
+//                    .append(u_by_f, new BasicDBObject(QueryOperators.NE, txid))
+//                    .append(db_time_f, new BasicDBObject(QueryOperators.EXISTS, false)),
+//                new BasicDBObject(stat_f, Values.COMMITED_STAT)
+//                    .append(txid_f, new BasicDBObject(QueryOperators.LT, txid))
+//                    .append(u_by_f, new BasicDBObject(QueryOperators.GT, txid))
+//                    .append(db_time_f, new BasicDBObject(QueryOperators.GT, time)),
+//                new BasicDBObject(stat_f, Values.COMMITED_STAT)
+//                    .append(txid_f, new BasicDBObject(QueryOperators.LT, txid))
+//                    .append(u_by_f, new BasicDBObject(QueryOperators.LT, txid))
+//                    .append(db_time_f, new BasicDBObject(QueryOperators.GT, time)),
+//                new BasicDBObject(txid_f, txid)
+//                    .append(stat_f, Values.INSERT_NEW_STAT)
+//            });
+
         DBObject con = new BasicDBObject()
             .append("$or", new BasicDBObject[]{
                 new BasicDBObject(stat_f, Values.COMMITED_STAT)
-                    .append(txid_f, new BasicDBObject(QueryOperators.LT, txid))
-                    .append(u_by_f, new BasicDBObject(QueryOperators.NE, txid))
-                    .append(db_time_f, new BasicDBObject(QueryOperators.EXISTS, false)),
-                new BasicDBObject(stat_f, Values.COMMITED_STAT)
-                    .append(txid_f, new BasicDBObject(QueryOperators.LT, txid))
-                    .append(u_by_f, new BasicDBObject(QueryOperators.GT, txid))
-                    .append(db_time_f, new BasicDBObject(QueryOperators.GT, time)),
-                new BasicDBObject(stat_f, Values.COMMITED_STAT)
-                    .append(txid_f, new BasicDBObject(QueryOperators.LT, txid))
-                    .append(u_by_f, new BasicDBObject(QueryOperators.LT, txid))
-                    .append(db_time_f, new BasicDBObject(QueryOperators.GT, time)),
-                new BasicDBObject(txid_f, txid)
-                    .append(stat_f, Values.INSERT_NEW_STAT)
+                          .append(txid_f, new BasicDBObject(QueryOperators.LT, txid))
+                          .append(u_by_f, new BasicDBObject(QueryOperators.NE, txid))
+                          .append(db_time_f, new BasicDBObject(QueryOperators.GT, time))
+                ,
+                new BasicDBObject(txid_f, txid).append(stat_f, Values.INSERT_NEW_STAT)
             });
 
         queryAdapt(query, con);
@@ -631,7 +678,7 @@ public class SidistranDBCollection extends DBCollection {
      *
      *  $and: [
      *        {
-     *          __s_.__s_stat: 2，
+     *          __s_.__s_stat: 2,
      *          $or:[
      *            //前序事务创建的，且未修改的
      *            {__s_.__s_c_txid:{$lt: cur.txid},__s_._s_c_time:{$exists:false}},
@@ -643,6 +690,15 @@ public class SidistranDBCollection extends DBCollection {
      *        }
      * ]
      *
+     * -----》
+     * 可以简化为
+     *  $and: [
+     *        {
+     *          __s_.__s_stat: 2,__s_.__s_c_txid:{$lt: cur.txid},__s_.__s_u_txid:{$ne:cur.txid},__s_.__s_c_time:{$gt:cur.time}
+     *        }
+     * ]
+     *
+     *
      * @param query
      */
     private void snapshotQuery_OnSidistranUpdate(DBObject query){
@@ -650,17 +706,9 @@ public class SidistranDBCollection extends DBCollection {
         long time = MongoTanscationManager.current().getTx_time();
 
         DBObject con = new BasicDBObject(stat_f, Values.COMMITED_STAT)
-            .append("$or", new BasicDBObject[]{
-                new BasicDBObject(txid_f, new BasicDBObject(QueryOperators.LT, txid))
-                    .append(u_by_f, new BasicDBObject(QueryOperators.NE, txid))
-                    .append(db_time_f, new BasicDBObject(QueryOperators.EXISTS, false)),
-                new BasicDBObject(txid_f, new BasicDBObject(QueryOperators.LT, txid))
-                    .append(u_by_f, new BasicDBObject(QueryOperators.GT, txid))
-                    .append(db_time_f, new BasicDBObject(QueryOperators.GT, time)),
-                new BasicDBObject(txid_f, new BasicDBObject(QueryOperators.LT, txid))
-                    .append(u_by_f, new BasicDBObject(QueryOperators.LT, txid))
-                    .append(db_time_f, new BasicDBObject(QueryOperators.GT, time))
-            });
+            .append(txid_f, new BasicDBObject(QueryOperators.LT, txid))
+            .append(u_by_f, new BasicDBObject(QueryOperators.NE, txid))
+            .append(db_time_f, new BasicDBObject(QueryOperators.GT, time));
         queryAdapt(query, con);
     }
 
@@ -676,7 +724,7 @@ public class SidistranDBCollection extends DBCollection {
      *
      * $and: [
      *        {
-     *          __s_.__s_stat: 2, __s_.__s_c_txid:{$lt: cur.txid},__s_.__s_u_txid:{$exists:false},__s_._s_c_time:{$exists:false}
+     *          __s_.__s_stat: 2, __s_.__s_c_txid:{$lt: cur.txid},__s_.__s_u_txid:-1l}
      *        }
      * ]
      *
@@ -687,8 +735,8 @@ public class SidistranDBCollection extends DBCollection {
 
         DBObject con = new BasicDBObject(stat_f, Values.COMMITED_STAT)
                     .append(txid_f, new BasicDBObject(QueryOperators.LT, txid))
-            .append(u_by_f, new BasicDBObject(QueryOperators.EXISTS, false))
-            .append(db_time_f, new BasicDBObject(QueryOperators.EXISTS, false));
+                    .append(u_by_f, -1l);
+            //.append(db_time_f, new BasicDBObject(QueryOperators.EXISTS, false));
         queryAdapt(query, con);
     }
 
@@ -832,7 +880,7 @@ public class SidistranDBCollection extends DBCollection {
         //释放所有的资源
         //1.将占用数据，解除
         super.update(new BasicDBObject(u_by_f, txid),
-            new BasicDBObject("$unset", new BasicDBObject(u_by_f, "")),
+            new BasicDBObject("$set", new BasicDBObject(u_by_f, -1l)),
             false, true, WriteConcern.ACKNOWLEDGED, dbEncoder
         );
         //2.标记所有的临时数据为需要被删除

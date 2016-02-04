@@ -87,6 +87,19 @@ class MongoTransaction{
                         "$set",
                         new BasicDBObject(stat_f, Values.COMMITED_STAT)
                         .append(txid_f, maxtxid)
+                         //设置为永不超时
+                         // @see SidistranDBCollection.snapshotQuery_OnSidistranUpdate()
+                         // @see SidistranDBCollection.sidistranQueryAdapt()
+                         // 为了简化查询，因此要这个字段存在。
+                         //因此，设置为Long.MAX_VALUE
+                         //意思是：这个数据永远不会过期
+                         .append(time_f, Long.MAX_VALUE)
+                         //设置为-1
+                         // @see SidistranDBCollection.snapshotQuery_OnSidistranUpdate()
+                         // @see SidistranDBCollection.sidistranQueryAdapt()
+                         // 为了简化查询，因此要这个字段存在。
+                         //因此，设置为-1
+                         .append(uby_f, -1l)
                     ).append(
                         "$unset",
                         new BasicDBObject(ufrom_f, "")

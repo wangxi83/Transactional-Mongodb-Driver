@@ -41,7 +41,6 @@ class SidistranMongoOpertaionExecutor implements OperationExecutor {
     }
 
     public <T> T execute(final ReadOperation<T> operation, final ReadPreference readPreference) {
-        System.out.println("ReadOperation:"+operation.getClass());
         ReadBinding binding = getReadBinding(readPreference);
         try {
             return operation.execute(binding);
@@ -51,7 +50,6 @@ class SidistranMongoOpertaionExecutor implements OperationExecutor {
     }
 
     public <T> T execute(final WriteOperation<T> operation) {
-        System.out.println("WriteOperation"+operation.getClass());
         WriteBinding binding = getWriteBinding();
         try {
             return operation.execute(binding);
