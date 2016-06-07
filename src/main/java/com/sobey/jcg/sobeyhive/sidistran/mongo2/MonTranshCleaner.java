@@ -1,6 +1,11 @@
 package com.sobey.jcg.sobeyhive.sidistran.mongo2;
 
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Timer;
 import java.util.TimerTask;
@@ -29,17 +34,12 @@ import com.sobey.jcg.sobeyhive.sidistran.mongo2.Constants.Values;
  * 定时删除垃圾
  */
 class MonTranshCleaner{
-    private String stat_f = Fields.ADDITIONAL_BODY+"."+Fields.STAT_FILED_NAME;
-    private String db_time_f = Fields.ADDITIONAL_BODY+"."+Fields.GARBAGE_TIME_NAME;
-
     private MongoClient mongoClient;
     private Timer transhAddTimer;
     private Timer transhReleaseTimer;
+    private DBCollection trashCollection;
 
     private static ConcurrentMap<String, MonTranshCleaner> map = new ConcurrentHashMap();
-
-    private static String ID_ = "Transh";
-    private static String time_f = "time";
 
     private MonTranshCleaner(){
 
@@ -50,12 +50,14 @@ class MonTranshCleaner{
             mongoClient = ((SidistranMongoClient)mongoClient).returnOriClient();
         }
         this.mongoClient = mongoClient;
+        this.trashCollection =  mongoClient.getDB(Constants.TRANSACTION_DB)
+            .getCollection(Constants.TRANSACTION_TRASH_CLT);
         this.transhAddTimer = new Timer("MonTranshAdd");
         this.transhAddTimer.schedule(transhAdd, 1l, 500l);
 
         this.transhReleaseTimer = new Timer("MonTranshCleaner");
 //        this.transhReleaseTimer.schedule(transhRelease, 1000l, 1800000l);
-        this.transhReleaseTimer.schedule(transhRelease, 1l, 300000l);
+        this.transhReleaseTimer.schedule(transhRelease, 1l, 60000l);
     }
 
     /**
@@ -96,21 +98,17 @@ class MonTranshCleaner{
         @SuppressWarnings("deprecation")
         public void run() {
             try {
-                DBObject dbObject = new BasicDBObject("_id", ID_);
-                BasicDBObject updates = new BasicDBObject();
+                List<DBObject> list = new ArrayList<>();
                 for (Iterator<Entry<String, String>> itr = transhes.entrySet().iterator();
                      itr.hasNext(); ) {
                     Entry<String, String> entry = itr.next();
-                    String cltAndDB = entry.getKey();
-                    String[] temp = cltAndDB.split("@");
-                    updates.append(temp[1] + "." + temp[0], 1l);
+                    String temp = entry.getKey();
+                    String[] cltAndDB = temp.split("@");
+                    list.add(new BasicDBObject(cltAndDB[1], cltAndDB[0]));
                     itr.remove();
                 }
-                if (!updates.isEmpty()) {
-                    DBObject update = new BasicDBObject("$inc", updates);
-                    mongoClient.getDB(Constants.TRANSACTION_DB)
-                        .getCollection(Constants.TRANSACTION_UTIL_CLT)
-                        .findAndModify(dbObject, null, null, false, update, false, true);
+                if(list!=null&&!list.isEmpty()){
+                    trashCollection.insert(list, WriteConcern.ACKNOWLEDGED);
                 }
             }catch (Exception e){
                 Logger.getLogger(MonTranshCleaner.class.getName()+".transhAdd()")
@@ -123,39 +121,37 @@ class MonTranshCleaner{
         @Override
         @SuppressWarnings("deprecation")
         public void run() {
-            DBObject result = null;
-            DBObject dbObject = new BasicDBObject("_id", ID_);
-            //从库中获取是否有需要清理的DB
-            DBCollection clt = mongoClient.getDB(Constants.TRANSACTION_DB)
-                .getCollection(Constants.TRANSACTION_UTIL_CLT);
-
-            try {
-                result = clt.findAndRemove(dbObject);
-            }catch (IllegalStateException e){
-                if(!ExceptionUtils.getRootCauseMessage(e).startsWith("state should be: open")){
-                    throw e;
+            Map<String, HashSet<String>> result = new HashMap<>();
+            for (Iterator<DBObject> itr = trashCollection.find(new BasicDBObject(),
+                new BasicDBObject("_id", 0)).limit(500).iterator();
+                 itr.hasNext(); ) {
+                DBObject dbObject = itr.next();
+                String DB = dbObject.keySet().iterator().next();
+                String colt = (String) dbObject.get(DB);
+                HashSet<String> colts = result.get(DB);
+                if (colts == null) {
+                    colts = new HashSet<>();
+                    result.put(DB, colts);
                 }
+                colts.add(colt);
+                trashCollection.remove(dbObject);
             }
 
-            if(result!=null){
+
+            if(!result.isEmpty()){
                 try{
                     long minDBTime = findMinDBTimeFromActiveTx();
 
                     for(Iterator<String> itr = result.keySet().iterator();
                         itr.hasNext();){
                         String dbName = itr.next();
-                        if(!dbName.equals("_id")){
-                            DB db = mongoClient.getDB(dbName);
-
-                            DBObject DB = (DBObject)result.get(dbName);
-                            for(Iterator<String> itr_ = DB.keySet().iterator();
-                                itr_.hasNext();){
-                                String cltName = itr_.next();
-
-                                clt = db.getCollection(cltName);
-                                doClean(clt, minDBTime);
-                            }
-                            System.out.println("处理==="+DB);
+                        DB db = mongoClient.getDB(dbName);
+                        HashSet<String> colts = result.get(dbName);
+                        for(Iterator<String> itr_ = colts.iterator();
+                            itr_.hasNext();){
+                            String cltName = itr_.next();
+                            DBCollection clt = db.getCollection(cltName);
+                            doClean(clt, minDBTime);
                         }
                     }
                 }catch (Exception e){
@@ -188,6 +184,8 @@ class MonTranshCleaner{
      */
     private Logger logger = Logger.getLogger(MonTranshCleaner.class.getName());
     private void doClean(DBCollection clt, long dbTime){
+        String stat_f = Fields.ADDITIONAL_BODY + "." + Fields.STAT_FILED_NAME;
+        String db_time_f = Fields.ADDITIONAL_BODY + "." + Fields.GARBAGE_TIME_NAME;
         DBObject query = new BasicDBObject("$or", new BasicDBObject[]{
             new BasicDBObject(stat_f, Values.NEED_TO_REMOVE),
             new BasicDBObject(db_time_f, new BasicDBObject(QueryOperators.LTE, dbTime))
@@ -203,6 +201,7 @@ class MonTranshCleaner{
      * @return
      */
     private long findMinDBTimeFromActiveTx(){
+        String time_f = "time";
         DBCursor cursor = mongoClient.getDB(Constants.TRANSACTION_DB)
             .getCollection(Constants.TRANSACTION_TX_CLT)
             .find(new BasicDBObject(time_f, new BasicDBObject("$exists", true)))

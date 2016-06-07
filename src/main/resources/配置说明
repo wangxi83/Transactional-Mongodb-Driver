@@ -1,36 +1,124 @@
-1. if your working db already has datas, you must do this:
+1.如果是一个历史库，在使用之前，需要执行一个
+ db.XX.update({}, {$set:{__s_.__s_stat: 2, __s_.__s_g_time:Long.MAX_VALUE,__s_.__s_c_txid:-1l,__s_.__s_u_txid:-1l})
 
-db.XX.update({}, {$set:{__s_.__s_stat:2}})
+  重要的事情：
+  1）当前连接中，必须要有一个“transaction”这个DB
+  2）当前连接的DB用户，必须能够访问“transaction”这个DB
+  3）如果需要对一个字段建立唯一索引，假设字段为aaa
+     那么，一定要建立aaa和unique_这个字段的联合唯一索引。
+     也就是说，所有的唯一索引，一定要把unique_这个字段带上一起建
 
- very important
-  1）your connection must can see the DB named “transaction”
-  2）the user with credential must can readWrite DB-“transaction”
-  3）if your collection has unique index, 
-     i.e. 
-     Collection A has index {name=test_unique, field=test}
-     you must set index name=test_unique to {name=test_unique, field=[test, unique_]}
-     it means: any unique index already exists, must modify it that add a field named "unique_" to the index
-  
-  
-  
-  
-2.config SidistranMongoClient int Spring
+2.在Spring中使用SidistranMongoClient对象
+  不能再使用“mongo”标签了，应该直接配置这个对象bean
 
-can not use “mongo” label，you should config a <bean id="mongo" class="SidistranMongoClient"> instead
+     <bean id="mongo" class="com.sobey.jcg.sobeyhive.sidistran.mongo2.SidistranMongoClient">
+          <constructor-arg name="seeds">
+              <list>
+                  <bean class="com.mongodb.ServerAddress">
+                      <constructor-arg name="host" value="172.16.131.49"/>
+                      <constructor-arg name="port" value="2181"/>
+                  </bean>
+                  <bean class="com.mongodb.ServerAddress">
+                      <constructor-arg name="host" value="172.16.131.49"/>
+                      <constructor-arg name="port" value="2181"/>
+                  </bean>
+                  <bean class="com.mongodb.ServerAddress">
+                      <constructor-arg name="host" value="172.16.131.49"/>
+                      <constructor-arg name="port" value="2181"/>
+                  </bean>
+              </list>
+          </constructor-arg>
+          <constructor-arg name="options">
+              <bean class="com.sobey.jcg.sobeyhive.sidistran.mongo2.SidistranMonProperty">
+                  <property name="maxConnectionsPerHost" value="200"/>
+                  <property name="threadsAllowedToBlockForConnectionMultiplier" value="100"/>
+                  <property name="connectTimeout" value="10000"/>
+                  <property name="maxWaitTime" value="15000"/>
+                  <property name="socketKeepAlive" value="true"/>
+                  <property name="socketTimeout" value="15000"/>
+              </bean>
+          </constructor-arg>
+      </bean>
+
+      或者
+
+      <bean id="mongo" class="com.sobey.jcg.sobeyhive.sidistran.mongo2.SidistranMongoClient">
+            <!--
+              mongodb://[username:password@]host1[:port1][,host2[:port2],...[,hostN[:portN]]][/[database][?options]]
+              [uri]@see https://docs.mongodb.org/manual/reference/connection-string/
+              [options]@see https://docs.mongodb.org/manual/reference/connection-string/#connections-connection-options
+            -->
+            <constructor-arg name="uri" value="mongodb://172.16.131.39:27017,172.16.131.36:27017,172.16.131.37:27017/"/>
+            <constructor-arg name="options">
+                <bean class="com.sobey.jcg.sobeyhive.sidistran.mongo2.SidistranMonProperty">
+                    <property name="maxConnectionsPerHost" value="200"/>
+                    <property name="threadsAllowedToBlockForConnectionMultiplier" value="100"/>
+                    <property name="connectTimeout" value="10000"/>
+                    <property name="maxWaitTime" value="15000"/>
+                    <property name="socketKeepAlive" value="true"/>
+                    <property name="socketTimeout" value="15000"/>
+                </bean>
+            </constructor-arg>
+        </bean>
+
+        或者
+        <bean id="mongo" class="com.sobey.jcg.sobeyhive.sidistran.mongo2.SidistranMongoClient">
+            <!--
+              mongodb://[username:password@]host1[:port1][,host2[:port2],...[,hostN[:portN]]][/[database][?options]]
+              [uri]@see https://docs.mongodb.org/manual/reference/connection-string/
+              [options]@see https://docs.mongodb.org/manual/reference/connection-string/#connections-connection-options
+            -->
+            <constructor-arg name="replica_set" value="172.16.131.39:27017,172.16.131.36:27017,172.16.131.37:27017"/>
+            <constructor-arg name="user" value="root"/>
+            <constructor-arg name="password" value="pwsd"/>
+            <constructor-arg name="db" value="test"/>
+            <constructor-arg name="options">
+                <bean class="com.sobey.jcg.sobeyhive.sidistran.mongo2.SidistranMonProperty">
+                    <property name="maxConnectionsPerHost" value="200"/>
+                    <property name="threadsAllowedToBlockForConnectionMultiplier" value="100"/>
+                    <property name="connectTimeout" value="10000"/>
+                    <property name="maxWaitTime" value="15000"/>
+                    <property name="socketKeepAlive" value="true"/>
+                    <property name="socketTimeout" value="15000"/>
+                </bean>
+            </constructor-arg>
+        </bean>
 
 
+  如果是接入SidistranManager的环境，则应该为其注入一个"SidistranConfig“对象。
 
-3.demo:
+
+3.本地使用
 
    SidistranMongoClient mongo = new SidistranMongoClient(serverAddress, credentials);
 
-   MongoTanscationManager tanscationManager = new MongoTanscationManager(mongo);//this is singleton
+   MongoTanscationManager tanscationManager = new MongoTanscationManager(mongo);
 
-   tanscationManager.begin();//begin a transaction
+   tanscationManager.begin();//开启事务
 
    do_with(mongo);
 
-   tanscationManager.commit();//commit it
+   tanscationManager.commit();//提交事务
 
-   tanscationManager.close();//you must close the MongoTanscationManager if won't use anymore
+   tanscationManager.close();//关闭事务管理器
+   mongo.close();
+
+
+4.分布式使用
+   long txid = GetFromNetwork();//从分布式上下文获取txid
+   GlobalSidistranAware.announceTx(txid);//申明分布式事务ID
+
+
+   SidistranMongoClient mongo = new SidistranMongoClient(serverAddress, credentials);
+   //需要的是分布式MongoTanscationManager
+   MongoTanscationManager tanscationManager = new MongoTanscationManager(new SidistranConfig(), mongo);
+
+    //其他代码不变
+   tanscationManager.begin();//开启事务
+
+   do_with(mongo);
+
+   tanscationManager.commit();//提交事务
+
+   tanscationManager.close();//关闭事务管理器
    mongo.close();

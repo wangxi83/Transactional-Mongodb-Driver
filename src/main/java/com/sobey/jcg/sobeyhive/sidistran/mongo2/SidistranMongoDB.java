@@ -13,8 +13,8 @@ import com.mongodb.DefaultDBEncoder;
 import com.mongodb.Mongo;
 import com.mongodb.WriteConcern;
 import com.sobey.jcg.sobeyhive.sidistran.mongo2.ex.SidistranMongoException;
+import com.sobey.jcg.sobeyhive.sidistran.mongo2.utils.CollectionListConfiger;
 import com.sobey.jcg.sobeyhive.sidistran.mongo2.utils.MethodNameUtil;
-
 import net.sf.cglib.proxy.Enhancer;
 import net.sf.cglib.proxy.MethodInterceptor;
 import net.sf.cglib.proxy.MethodProxy;
@@ -84,7 +84,12 @@ public class SidistranMongoDB implements MethodInterceptor{
             return collection;
         }
 
-        collection = new SidistranDBCollection(db, name);
+        if(CollectionListConfiger.sidistranCollection(db.getName(), name)) {
+            //只有配置了的collection，才使用sidistran
+            collection = new SidistranDBCollection(db, name);
+        }else{
+            collection = new CommonDBCollection(db, name);
+        }
         if (mongo.getMongoClientOptions().getDbDecoderFactory() != DefaultDBDecoder.FACTORY) {
             collection.setDBDecoderFactory(mongo.getMongoClientOptions().getDbDecoderFactory());
         }

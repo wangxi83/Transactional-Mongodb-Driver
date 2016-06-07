@@ -3,19 +3,24 @@ package com.sobey.jcg.sobeyhive.sidistran.mongo2;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 
 import org.apache.commons.lang.ArrayUtils;
+import org.apache.commons.lang.StringUtils;
 import org.apache.commons.lang.reflect.MethodUtils;
 import org.bson.BSONObject;
+import org.bson.types.ObjectId;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.mongodb.AggregationOptions;
 import com.mongodb.AggregationOutput;
+import com.mongodb.BasicDBList;
 import com.mongodb.BasicDBObject;
 import com.mongodb.Cursor;
 import com.mongodb.DB;
@@ -24,7 +29,7 @@ import com.mongodb.DBCursor;
 import com.mongodb.DBEncoder;
 import com.mongodb.DBObject;
 import com.mongodb.InsertOptions;
-import com.mongodb.MongoClient;
+import com.mongodb.MongoCommandException;
 import com.mongodb.QueryOperators;
 import com.mongodb.ReadPreference;
 import com.mongodb.WriteConcern;
@@ -32,6 +37,8 @@ import com.mongodb.WriteResult;
 import com.sobey.jcg.sobeyhive.sidistran.mongo2.Constants.Fields;
 import com.sobey.jcg.sobeyhive.sidistran.mongo2.Constants.Values;
 import com.sobey.jcg.sobeyhive.sidistran.mongo2.ex.SidistranMongoCuccrentException;
+import com.sobey.jcg.sobeyhive.sidistran.mongo2.utils.CollectionListConfiger;
+
 
 /**
  * Created by WX on 2015/12/29.
@@ -51,24 +58,68 @@ public class SidistranDBCollection extends DBCollection {
     private String txid_f = Fields.ADDITIONAL_BODY+"."+Fields.TXID_FILED_NAME;
     private String u_by_f = Fields.ADDITIONAL_BODY+"."+Fields.UPDATEBY_TXID_NAME;
     private String db_time_f = Fields.ADDITIONAL_BODY+"."+Fields.GARBAGE_TIME_NAME;
+    private String id_f = Fields.ADDITIONAL_BODY+"."+Fields.ID_FIELD;
+
+
+    //2016-3-16 wx 这几个索引名字错了。需要重建。用old来指定删除这些垃圾
+    private String[] old_indices = new String[]{
+        Fields.STAT_FILED_NAME+Fields.GARBAGE_TIME_NAME,
+        Fields.STAT_FILED_NAME+Fields.TXID_FILED_NAME +Fields.UPDATEBY_TXID_NAME+Fields.GARBAGE_TIME_NAME,
+        Fields.TXID_FILED_NAME+Fields.STAT_FILED_NAME,
+        Fields.STAT_FILED_NAME+Fields.TXID_FILED_NAME+Fields.UPDATEBY_TXID_NAME,
+        Fields.STAT_FILED_NAME+Fields.UPDATEBY_TXID_NAME,
+        Fields.STAT_FILED_NAME,
+        Fields.GARBAGE_TIME_NAME
+    };
+
+    //新的索引名字
+    private String new_1 = "new_"+Fields.STAT_FILED_NAME+Fields.GARBAGE_TIME_NAME;
+    private String new_2 = "new_"+Fields.STAT_FILED_NAME+Fields.TXID_FILED_NAME
+        +Fields.UPDATEBY_TXID_NAME+Fields.GARBAGE_TIME_NAME;
+    private String new_3 = "new_"+Fields.TXID_FILED_NAME+Fields.STAT_FILED_NAME;
+    private String new_4 = "new_"+Fields.STAT_FILED_NAME+Fields.TXID_FILED_NAME+Fields.UPDATEBY_TXID_NAME;
+    private String new_5 = "new_"+Fields.STAT_FILED_NAME+Fields.UPDATEBY_TXID_NAME;
+    private String new_6 = "new_"+Fields.STAT_FILED_NAME;
+    private String new_7 = "new_"+Fields.GARBAGE_TIME_NAME;
+    private String new_8 = "new_"+Fields.ID_FIELD;
+
+
+    private static List<String> ops = Arrays.asList(
+        "$inc","$mul","$rename","$set","$unset","$min","$max","$currentDate",
+        "$addToSet","$pop","$pullAll","$pull","$pushAll","$push"
+    );
 
 
     private boolean indexEnsured;
     private MongoReadWriteLock readWriteLock;
 
-    private List<String> uniqueIndice = new ArrayList<String>();
+    private Map<String, List<String>> uniqueIndiceFields = new HashMap<String, List<String>>();
 
     SidistranDBCollection(DB database, String name) {
         super(database, name);
-        if(!indexEnsured) {
+        if(!indexEnsured&& CollectionListConfiger.needRefreshIndex(database.getName(), name)) {
+            for(String old : old_indices){
+                try {
+                    super.dropIndex(old);
+                }catch (Exception e){
+                }
+            }
             List<DBObject> indices = this.getIndexInfo();
             assureIndex(indices);
-            refreshUniqueFields(indices);
+            try {
+                refreshUniqueFields(indices);
+            }catch (MongoCommandException e){
+                if(e.getCode()!=12587){
+                    // { "errmsg" : "exception: cannot perform operation: a background operation is currently running for collection", "code" : 12587, "ok" : 0.0 }
+                    throw e;
+                }
+            }
             indexEnsured = true;
         }
-        readWriteLock = MongoReadWriteLock.getLock((MongoClient) database.getMongo());
+//        readWriteLock = MongoReadWriteLock.getLock((MongoClient) database.getMongo());
     }
 
+    //region 自动处理index
     private void assureIndex(List<DBObject> indices){
         boolean commonqueryIndex = false; //@see this.commonQueryAdatp()
         boolean sidistranQueryIndex_1 = false; //@see this.sidistranQueryAdapt(), MongoTransaction.commit()
@@ -77,118 +128,221 @@ public class SidistranDBCollection extends DBCollection {
         boolean expireQueryIndex = false; //@see MongoTransaction.commit()
         boolean statIndex = false; //@see MonTranshCleaner.doClean()
         boolean gtimeIndex = false; //@see MonTranshCleaner.doClean()
+        boolean idIndex = false;
 
         for(DBObject dbObject : indices){
             String name = (String)dbObject.get("name");
-            if(name.equals(Fields.STAT_FILED_NAME+Fields.GARBAGE_TIME_NAME)){ //"__s_stat__s_g_time"
+            if(name.equals(new_1)){ //"__s_stat__s_g_time"
                 commonqueryIndex = true;
             }
-            if(name.equals(
-                Fields.STAT_FILED_NAME+Fields.TXID_FILED_NAME
-                +Fields.UPDATEBY_TXID_NAME+Fields.GARBAGE_TIME_NAME)
-                ){ //"__s_stat__s_c_txid__s_u_txid__s_g_time"
+            if(name.equals(new_2)){ //"__s_stat__s_c_txid__s_u_txid__s_g_time"
                 sidistranQueryIndex_1 = true;
             }
-            if(name.equals(Fields.TXID_FILED_NAME+Fields.STAT_FILED_NAME)){ //"__s_c_txid__s_stat"
+            if(name.equals(new_3)){ //"__s_c_txid__s_stat"
                 sidistranQueryIndex_2 = true;
             }
-            if(name.equals(Fields.STAT_FILED_NAME+Fields.TXID_FILED_NAME+Fields.UPDATEBY_TXID_NAME)){ //"__s_stat__s_c_txid__s_u_txid"
+            if(name.equals(new_4)){ //"__s_stat__s_c_txid__s_u_txid"
                 findCommonOnUpdateQueryIndex = true;
             }
-            if(name.equals(Fields.STAT_FILED_NAME+Fields.UPDATEBY_TXID_NAME)){ //"__s_stat__s_u_txid"
+            if(name.equals(new_5)){ //"__s_stat__s_u_txid"
                 expireQueryIndex = true;
             }
-            if(name.equals(Fields.STAT_FILED_NAME)){//"__s_stat"
+            if(name.equals(new_6)){//"__s_stat"
                 expireQueryIndex = true;
             }
-            if(name.equals(Fields.GARBAGE_TIME_NAME)){ //"__s_g_time"
+            if(name.equals(new_7)){ //"__s_g_time"
                 gtimeIndex = true;
+            }
+            if(name.equals(new_8)){//"__s_id"
+                idIndex = true;
             }
         }
 
+        // backgournd的设置，在这里没有起到预想的作用。即使设置了，还是会等待服务器返回而不是异步处理
+        // 由于AsyncOperationExecutor测试后，发现不起作用，因此只有自己用线程来做。
         if(!commonqueryIndex){
-            this.createIndex(new BasicDBObject(Fields.STAT_FILED_NAME, 1).append(Fields.GARBAGE_TIME_NAME, 1)
-            , new BasicDBObject("background", 1).append("name", Fields.STAT_FILED_NAME+Fields.GARBAGE_TIME_NAME));
+            new Thread(){
+                public void run(){
+                    try {
+                        SidistranDBCollection.super.createIndex(new BasicDBObject(stat_f, 1).append(db_time_f, 1)
+                            , new BasicDBObject("background", true).append("name", new_1));
+                    }catch (Exception e){
+                    }
+                }
+            }.start();
         }
         if(!sidistranQueryIndex_1){
-            this.createIndex(
-                new BasicDBObject(Fields.STAT_FILED_NAME, 1)
-                .append(Fields.TXID_FILED_NAME, 1)
-                .append(Fields.UPDATEBY_TXID_NAME, 1)
-                .append(Fields.GARBAGE_TIME_NAME, 1)
-                ,
-                new BasicDBObject("background", 1)
-                .append("name", Fields.STAT_FILED_NAME + Fields.TXID_FILED_NAME
-                    + Fields.UPDATEBY_TXID_NAME + Fields.GARBAGE_TIME_NAME));
+            new Thread(){
+                public void run(){
+                    try {
+                        SidistranDBCollection.super.createIndex(
+                            new BasicDBObject(stat_f, 1)
+                                .append(txid_f, 1)
+                                .append(u_by_f, 1)
+                                .append(db_time_f, 1)
+                            ,
+                            new BasicDBObject("background", true).append("name", new_2));
+                    }catch (Exception e){
+                    }
+                }
+            }.start();
         }
         if(!sidistranQueryIndex_2){
-            this.createIndex(new BasicDBObject(Fields.TXID_FILED_NAME, 1).append(Fields.STAT_FILED_NAME, 1)
-                , new BasicDBObject("background", 1).append("name", Fields.TXID_FILED_NAME+Fields.STAT_FILED_NAME));
+            new Thread(){
+                public void run(){
+                    try {
+                        SidistranDBCollection.super.createIndex(new BasicDBObject(txid_f, 1).append(stat_f, 1)
+                            , new BasicDBObject("background", true).append("name", new_3));
+                    }catch (Exception e){
+                    }
+                }
+            }.start();
         }
         if(!findCommonOnUpdateQueryIndex){
-            this.createIndex(
-                new BasicDBObject(Fields.STAT_FILED_NAME, 1)
-                    .append(Fields.TXID_FILED_NAME, 1)
-                    .append(Fields.UPDATEBY_TXID_NAME, 1)
-                ,
-                new BasicDBObject("background", 1)
-                    .append("name", Fields.STAT_FILED_NAME + Fields.TXID_FILED_NAME + Fields.UPDATEBY_TXID_NAME));
+            new Thread(){
+                public void run(){
+                    try {
+                        SidistranDBCollection.super.createIndex(
+                            new BasicDBObject(stat_f, 1)
+                                .append(txid_f, 1)
+                                .append(u_by_f, 1)
+                            ,
+                            new BasicDBObject("background", true)
+                                .append("name", new_4));
+                    }catch (Exception e){
+                    }
+                }
+            }.start();
         }
         if(!expireQueryIndex){
-            this.createIndex(new BasicDBObject(Fields.STAT_FILED_NAME, 1).append(Fields.UPDATEBY_TXID_NAME, 1)
-                , new BasicDBObject("background", 1).append("name", Fields.STAT_FILED_NAME+Fields.UPDATEBY_TXID_NAME));
+            new Thread(){
+                public void run(){
+                    try {
+                        SidistranDBCollection.super.createIndex(new BasicDBObject(stat_f, 1).append(u_by_f, 1)
+                            , new BasicDBObject("background", true).append("name", new_5));
+                    }catch (Exception e){
+                    }
+                }
+            }.start();
         }
         if(!statIndex){
-            this.createIndex(new BasicDBObject(Fields.STAT_FILED_NAME, 1)
-                , new BasicDBObject("background", 1).append("name", Fields.STAT_FILED_NAME));
+            new Thread(){
+                public void run(){
+                    try {
+                        SidistranDBCollection.super.createIndex(new BasicDBObject(stat_f, 1)
+                            , new BasicDBObject("background", true).append("name", new_6));
+                    }catch (Exception e){
+                    }
+                }
+            }.start();
         }
         if(!gtimeIndex){
-            this.createIndex(new BasicDBObject(Fields.GARBAGE_TIME_NAME, 1)
-                , new BasicDBObject("background", 1).append("name", Fields.GARBAGE_TIME_NAME));
+            new Thread(){
+                public void run(){
+                    try {
+                        SidistranDBCollection.super.createIndex(new BasicDBObject(db_time_f, 1)
+                            , new BasicDBObject("background", true).append("name", new_7));
+                    }catch (Exception e){
+                    }
+                }
+            }.start();
+        }
+        if(!idIndex){
+            new Thread(){
+                public void run(){
+                    try {
+                        SidistranDBCollection.super.createIndex(new BasicDBObject(id_f, 1)
+                            , new BasicDBObject("background", true).append("name", new_8));
+                    }catch (Exception e){
+                    }
+                }
+            }.start();
         }
     }
+
+    @Override
+    /**
+     * 加入唯一鍵輔助字段
+     */
+    public void createIndex(DBObject keys, DBObject options) {
+        Boolean unique;
+        try {
+            unique = (Boolean) options.get("unique");
+        }catch (ClassCastException e){
+            Integer i = (Integer) options.get("unique");
+            unique = i.intValue()==1?new Boolean(true):new Boolean(false);
+        }
+
+        String name = (String)options.get("name");
+        if(unique!=null&&unique.booleanValue()) {
+            if (!keys.containsField(Fields.UNIQUE_)) {
+                keys.put(Fields.UNIQUE_, 1);
+            }
+            options.put("background", 1);
+
+            super.createIndex(keys, options);
+
+            //如果是创建了新索引，那么也徐亚记录下来
+            //但是要建立成功才记录
+            List<String> uniqueFieldsInIndex = uniqueIndiceFields.get(name);
+            if(uniqueFieldsInIndex==null){
+                uniqueFieldsInIndex = new ArrayList<String>();
+                uniqueIndiceFields.put(name, uniqueFieldsInIndex);
+            }
+
+            for(Iterator<String> itr = keys.keySet().iterator();
+                itr.hasNext();){
+                String field = itr.next();
+                uniqueFieldsInIndex.add(field);
+            }
+            uniqueFieldsInIndex.add(Fields.UNIQUE_);
+        }else{
+            super.createIndex(keys, options);
+        }
+    }
+
 
     private void refreshUniqueFields(List<DBObject> indices){
         for(DBObject index : indices) {
             DBObject key = (DBObject) index.get("key");
             //获取唯一键。在获取快照的时候需要使用
             Boolean unique = (Boolean) index.get("unique");
+            String name = (String)index.get("name");
             if (unique != null && unique.booleanValue()) {
-//                List<String> temp = new ArrayList<String>();
-//                for (Iterator<String> itr_ = key.keySet().iterator();
-//                     itr_.hasNext(); ) {
-//                    temp.add(itr_.next());
-//                }
-//                String[] uniqueIndex = temp.toArray(new String[temp.size()]);
-//                if(uniqueIndex.length>1) {
-//                    Arrays.sort(uniqueIndex);
-//                }
-//                uniqueIndice.add(uniqueIndex[0].toLowerCase());
+                List<String> uniqueFieldsInIndex = uniqueIndiceFields.get(name);
+                if(uniqueFieldsInIndex==null){
+                    uniqueFieldsInIndex = new ArrayList<String>();
+                    uniqueIndiceFields.put(name, uniqueFieldsInIndex);
+                }
+
+                BasicDBObject temp = new BasicDBObject();
+                for (Iterator<String> itr_ = key.keySet().iterator();
+                     itr_.hasNext(); ) {
+                    String uniqueField = itr_.next();
+                    temp.put(uniqueField, 1);
+                    uniqueFieldsInIndex.add(uniqueField);
+                }
 
                 if(!key.containsField(Fields.UNIQUE_)){
                     //如果唯一键里面不包含这个辅助字段，则加上
-                    BasicDBObject temp = new BasicDBObject();
-                    for (Iterator<String> itr_ = key.keySet().iterator();
-                         itr_.hasNext(); ) {
-                        temp.put(itr_.next(), 1);
-                    }
                     temp.put(Fields.UNIQUE_, 1);
-
                     this.dropIndex(index.get("name").toString());
                     this.createIndex(temp,
-                        new BasicDBObject("unique", 1).append("name", index.get("name")).append("background", 1));
+                        new BasicDBObject("unique", 1).append("name", name).append("background", 1));
+                    uniqueFieldsInIndex.add(Fields.UNIQUE_);
                 }
             }
         }
     }
+    //endregion
 
     //region ----------------insert-----------------------
     /**
      * 所有的insert都会走到这个方法，因此覆盖此方法
      */
     @Override
-    public WriteResult insert(final List<? extends DBObject> documents, final InsertOptions insertOptions) {
-        if(MongoTanscationManager.hasTransaction()){
+    public WriteResult insert(List<? extends DBObject> documents, InsertOptions insertOptions) {
+        if (MongoTanscationManager.hasTransaction()) {
             long txid = MongoTanscationManager.txid_AtThisContext();
             /**
              * 如果是在sidistran环境下，则通过版本来控制可见性 {@see this.find()}
@@ -201,22 +355,40 @@ public class SidistranDBCollection extends DBCollection {
                     body.put(Fields.STAT_FILED_NAME, Values.INSERT_NEW_STAT);
                     //txid用于控制事务范围
                     body.put(Fields.TXID_FILED_NAME, txid);
+                    //这里开始转换_id
+                    Object _id = cur.get(ID_FIELD_NAME);
+                    if(_id==null){
+                        //id为空，则生成
+                        _id = new ObjectId();
+                        cur.put(ID_FIELD_NAME, _id);
+                    }
+                    body.put(Fields.ID_FIELD, _id);//设置到body中
+
                     cur.put(Fields.ADDITIONAL_BODY, body);
                 }
             }
             MongoTanscationManager.current().addTransactionTargetIfAbsent(this);
-        }else{
+        } else {
             for (DBObject cur : documents) {
                 if (cur.get(Fields.ADDITIONAL_BODY) == null) {
                     DBObject body = new BasicDBObject();
                     //stat用于控制可见性
                     body.put(Fields.STAT_FILED_NAME, Values.COMMITED_STAT);
-                    body.put(db_time_f, Long.MAX_VALUE);
+                    body.put(Fields.GARBAGE_TIME_NAME, Long.MAX_VALUE);
+                    body.put(Fields.TXID_FILED_NAME, -1l);
+                    body.put(Fields.UPDATEBY_TXID_NAME, -1l);
+                    //这里开始转换_id
+                    Object _id = cur.get(ID_FIELD_NAME);
+                    if(_id==null){
+                        //id为空，则生成
+                        _id = new ObjectId();
+                        cur.put(ID_FIELD_NAME, _id);
+                    }
+                    body.put(Fields.ID_FIELD, _id);//设置到body中
                     cur.put(Fields.ADDITIONAL_BODY, body);
                 }
             }
         }
-
         try {
             return super.insert(documents, insertOptions);
         }catch (Exception e){
@@ -226,8 +398,25 @@ public class SidistranDBCollection extends DBCollection {
             throw e;
         }
     }
-    //endregion
 
+    /**
+     * 重写save。不能出现upsert的情况
+     * @param document
+     * @param writeConcern
+     * @return
+     */
+    @Override
+    public WriteResult save(DBObject document, WriteConcern writeConcern) {
+        Object id = document.get(ID_FIELD_NAME);
+        if (id == null) {
+            return insert(document, writeConcern);
+        } else {
+            //sidistran的表，id在返回的时候，都转换成了__s_._id
+            DBObject filter = new BasicDBObject(id_f, id);
+            return this.update(filter, document, true, false, writeConcern);
+        }
+    }
+    //endregion
 
     //region ----------------remove-----------------------
     /**
@@ -236,7 +425,7 @@ public class SidistranDBCollection extends DBCollection {
      * 删除变成逻辑删除
      */
     @Override
-    public WriteResult remove(final DBObject query, final WriteConcern writeConcern) {
+    public WriteResult remove(DBObject query, WriteConcern writeConcern) {
         return this.remove(query, writeConcern, null);
     }
     @Override
@@ -245,7 +434,7 @@ public class SidistranDBCollection extends DBCollection {
     }
     @Override
     public WriteResult remove(DBObject query, WriteConcern writeConcern, DBEncoder encoder) {
-        if(MongoTanscationManager.hasTransaction()){
+        if (MongoTanscationManager.hasTransaction()) {
             //在sidistran环境下，删除变成逻辑删除
             //这里一定要使用this的，因为是版本事务控制
             //query会在update中处理
@@ -253,35 +442,14 @@ public class SidistranDBCollection extends DBCollection {
                 WriteResult result = this.update(query, new BasicDBObject(), false, true,
                     writeConcern, encoder, UpdateType.REMOVE);
                 return result;
-            }catch (Exception e){
+            } catch (Exception e) {
                 MongoTanscationManager.current().onError(e);
                 throw e;
             }
-        }else {
+        } else {
             //正常模式下，不能看到sidistran的数据
             commonQueryAdapt(query);
             return super.remove(query, writeConcern, encoder);
-        }
-    }
-    @Override
-    public DBObject findAndRemove(DBObject query) {
-        if(true){
-            throw new UnsupportedOperationException("还没有完成");
-        }
-        try {
-            readWriteLock.readLock().lock();
-            //在sidistran环境下，删除变成逻辑删除。
-            if (MongoTanscationManager.hasTransaction()) {
-                sidistranQueryAdapt(query);
-                DBObject update = new BasicDBObject();// removeAdapt();
-                return super.findAndModify(query, update);
-            } else {
-                //正常模式下，不能看到sidistran的数据
-                commonQueryAdapt(query);
-                return super.findAndRemove(query);
-            }
-        }finally {
-            readWriteLock.readLock().unlock();
         }
     }
     //endregion
@@ -292,24 +460,21 @@ public class SidistranDBCollection extends DBCollection {
      * 同上
      */
     @Override
-    public long getCount(DBObject query, DBObject projection, final long limit, final long skip,
-                         final ReadPreference readPreference) {
+    public long getCount(DBObject query, DBObject projection, long limit, long skip,
+                         ReadPreference readPreference) {
         if (MongoTanscationManager.hasTransaction()) {
             sidistranQueryAdapt(query);
         } else {
             //正常模式下，不能看到sidistran的数据
             commonQueryAdapt(query);
         }
-        if(projection==null){
-            projection = new BasicDBObject();
-        }
-        projectionAdapt(projection);
+        projection = new BasicDBObject(ID_FIELD_NAME, 1);
 
         try {
-            readWriteLock.readLock().lock();
+            //readWriteLock.readLock().lock();
             return super.getCount(query, projection, limit, skip, readPreference);
         }finally {
-            readWriteLock.readLock().unlock();
+            //readWriteLock.readLock().unlock();
         }
     }
     //endregion
@@ -320,65 +485,72 @@ public class SidistranDBCollection extends DBCollection {
      * 查询方法，都需要覆盖
      */
     @Override
-    public DBCursor find(final DBObject query) {
+    public DBCursor find(DBObject query) {
         return this.find(query, null);
     }
     @Override
     public DBCursor find(DBObject query, DBObject projection) {
-        if(MongoTanscationManager.hasTransaction()) {
+        if (MongoTanscationManager.hasTransaction()) {
             sidistranQueryAdapt(query);
-        }else{
+        } else {
             //正常模式下，不能看到sidistran的数据
             commonQueryAdapt(query);
         }
-        if(projection==null){
+        if (projection == null) {
             projection = new BasicDBObject();
         }
         projectionAdapt(projection);
+
         //DBDBCursor是一个服务端远程指针，实际上是用Collection的find方法
         //最终通过Excecutor的connection和服务端通讯取得next
         //因此，这里不能用super的，要new一个，把this传递进去
         try {
-            readWriteLock.readLock().lock();
-            DBCursor cursor = new DBCursor(this, query, projection, getReadPreference());
+            //readWriteLock.readLock().lock();
+            DBCursor cursor = new SidistranDBCursor(this, query, projection, getReadPreference());
             return cursor;
         }finally {
-            readWriteLock.readLock().unlock();
+            //readWriteLock.readLock().unlock();
         }
     }
     @Override
-    public DBObject findOne(DBObject query, DBObject projection, final DBObject sort,
-                            final ReadPreference readPreference) {
-        if(MongoTanscationManager.hasTransaction()) {
+    public DBObject findOne(DBObject query, DBObject projection, DBObject sort,
+                            ReadPreference readPreference) {
+        if (MongoTanscationManager.hasTransaction()) {
             sidistranQueryAdapt(query);
-        }else{
+        } else {
             //正常模式下，不能看到sidistran的数据
             commonQueryAdapt(query);
         }
-        if(projection==null){
+        if (projection == null) {
             projection = new BasicDBObject();
         }
         projectionAdapt(projection);
+
         try {
-            readWriteLock.readLock().lock();
-            return super.findOne(query, projection, sort, readPreference);
+            //readWriteLock.readLock().lock();
+            DBObject dbObject = super.findOne(query, projection, sort, readPreference);
+            updateResult(dbObject);
+            return dbObject;
         }finally {
-            readWriteLock.readLock().unlock();
+            //readWriteLock.readLock().unlock();
         }
     }
     @Override
-    public List distinct(final String fieldName, DBObject query, final ReadPreference readPreference) {
-        if(MongoTanscationManager.hasTransaction()) {
-            sidistranQueryAdapt(query);
-        }else{
-            //正常模式下，不能看到sidistran的数据
-            commonQueryAdapt(query);
-        }
+    public List distinct(String fieldName, DBObject query, ReadPreference readPreference) {
+        //2016-03-18 暂时注释屌。
+        //开启query的条件后的时间，超级慢。
+        //而目前的分析是：distinct一般不会传条件，因此暂时注释
+//        if(MongoTanscationManager.hasTransaction()) {
+//            sidistranQueryAdapt(query);
+//        }else{
+//            //正常模式下，不能看到sidistran的数据
+//            commonQueryAdapt(query);
+//        }
         try {
-            readWriteLock.readLock().lock();
+            //readWriteLock.readLock().lock();
             return super.distinct(fieldName, query, readPreference);
         }finally {
-            readWriteLock.readLock().unlock();
+            //readWriteLock.readLock().unlock();
         }
     }
 
@@ -389,28 +561,24 @@ public class SidistranDBCollection extends DBCollection {
      * update的处理都会走到这里
      */
     @Override
-    public WriteResult update(DBObject query, DBObject update, final boolean upsert, final boolean multi,
-                              final WriteConcern aWriteConcern, final DBEncoder encoder) {
+    public WriteResult update(DBObject query, DBObject update, boolean upsert, boolean multi,
+                              WriteConcern aWriteConcern, DBEncoder encoder) {
         return this.update(query, update, upsert, multi, aWriteConcern, encoder, UpdateType.UPDATE);
     }
 
-    private WriteResult update(DBObject query, DBObject update, final boolean upsert, final boolean multi,
-                              final WriteConcern aWriteConcern, final DBEncoder encoder, UpdateType updateType) {
+    private WriteResult update(DBObject query, DBObject update, boolean upsert, boolean multi,
+                               WriteConcern aWriteConcern, DBEncoder encoder, UpdateType updateType) {
+        WriteResult result = null;
         try {
-            readWriteLock.readLock().lock();
-            if(query instanceof CommitDBQuery){
+            //readWriteLock.readLock().lock();
+            if (query instanceof CommitDBQuery) {
                 return super.update(query, update, upsert, multi, aWriteConcern, encoder);
-            }else if (MongoTanscationManager.hasTransaction()) {
-                if(logger.isDebugEnabled()){
-                    logger.debug("SidistranDBCollection.事务环境下."+(updateType==UpdateType.REMOVE?"remove":"update"));
-                }
-
-                if (upsert) {
-                    throw new UnsupportedOperationException("Sidisitran环境下不能使用upsert=true");
+            } else if (MongoTanscationManager.hasTransaction()) {
+                if (logger.isDebugEnabled()) {
+                    logger.debug("SidistranDBCollection.事务环境下." + (updateType == UpdateType.REMOVE ? "remove" : "update"));
                 }
 
                 long txid = MongoTanscationManager.txid_AtThisContext();
-
                 //--------------warning!!!效率影响问题开始------------------
                 //这里有一个【非可靠】的乐观锁处理：
                 //1、先读取事务可见性中的待处理（所谓待处理就是值得当前事务中看到的stat=2的数据）数据，获取countA
@@ -427,8 +595,8 @@ public class SidistranDBCollection extends DBCollection {
                 int findCount = cursor.count();
                 if (findCount > 0) {
                     long time = System.currentTimeMillis();
-                    if(logger.isDebugEnabled()){
-                        logger.debug("SidistranDBCollection在事务环境下update，开始获取快照，快照数量："+findCount);
+                    if (logger.isDebugEnabled()) {
+                        logger.debug("SidistranDBCollection在事务环境下update，开始获取快照，快照数量：" + findCount);
                     }
                     List<DBObject> list = new ArrayList<>();
                     while (cursor.hasNext()) {
@@ -441,7 +609,7 @@ public class SidistranDBCollection extends DBCollection {
                         DBObject body = (DBObject) dbObject.get(Fields.ADDITIONAL_BODY);
                         if (body.get(Fields.UPDATEBY_TXID_NAME) != null) {
                             long locker = (long) body.get(Fields.UPDATEBY_TXID_NAME);
-                            if (locker != txid&&locker!=-1l) {
+                            if (locker != txid && locker != -1l) {
                                 try {
                                     throw new SidistranMongoCuccrentException("could not serialize access due to concurrent update." +
                                         " cur.txid=" + txid + " , _id=" + dbObject.get("_id") + ", locker=" + body.get(Fields.UPDATEBY_TXID_NAME));
@@ -453,38 +621,69 @@ public class SidistranDBCollection extends DBCollection {
 
                         body = new BasicDBObject();
                         int stat = updateType == UpdateType.UPDATE ? Values.INSERT_NEW_STAT : Values.NEED_TO_REMOVE;
-                        dbObject.put(Fields.ADDITIONAL_BODY, body);
-                        body.put(Fields.TXID_FILED_NAME, txid);
-                        body.put(Fields.STAT_FILED_NAME, stat);
-                        body.put(Fields.UPDATE_FROM_NAME, dbObject.get("_id"));
-                        //这个字段用来避免唯一键冲突
-                        //@see this.refreshUniqueFields();
-                        dbObject.put(Fields.UNIQUE_, Values.UNIQUE_VAL_SNAPSHOT);
-                        dbObject.removeField("_id");
-                        list.add(dbObject);
-                    }
-                    //复制快照数据
-                    //TODO：也许有一个更好的办法来处理快照。可以试试setOnInsert
-                    //@see https://docs.mongodb.org/manual/reference/operator/update/setOnInsert/#up._S_setOnInsert
-                    super.insert(list, new InsertOptions().writeConcern(aWriteConcern).dbEncoder(encoder));
-
-                    //然后，对原始数据增加当前事务标识。
-                    //这里需要处理的，只能是被update的原始数据
-                    DBObject update_4_common = this.getOriDataUpdateObj();//增加事务标识
-                    query_4_common = new BasicDBObject(query.toMap());//clone一个出来
-                    findCommonDataQuery_OnSidistranUpdate(query_4_common);
-                    //query_4_common标识的是common数据
-                    WriteResult r = super.update(query_4_common, update_4_common, upsert, multi, aWriteConcern, encoder);
-                    if (r.getN() != findCount) {
-                        try {
-                            throw new SidistranMongoCuccrentException("could not serialize access due to concurrent update");
-                        } finally {
-                            proRollback(encoder);
+                        if(updateType == UpdateType.UPDATE) {
+                            dbObject.put(Fields.ADDITIONAL_BODY, body);
+                            body.put(Fields.TXID_FILED_NAME, txid);
+                            body.put(Fields.STAT_FILED_NAME, stat);
+                            //这个就是原始ID.
+                            body.put(Fields.ID_FIELD, dbObject.get("_id"));
+                            dbObject.removeField("_id");
+                            //这个字段用来避免唯一键冲突
+                            //@see this.refreshUniqueFields();
+                            dbObject.put(Fields.UNIQUE_, Values.UNIQUE_VAL_SNAPSHOT);
+                            list.add(dbObject);
                         }
                     }
 
-                    if(logger.isDebugEnabled()){
-                        logger.debug("SidistranDBCollection在事务环境下update，快照处理完成，time="+(System.currentTimeMillis()-time));
+
+                    //然后，对原始数据增加当前事务标识。
+                    //这里需要处理的，只能是被update的原始数据
+                    DBObject update_4_common = this.getOriDataUpdateObj();//set事务标识
+                    query_4_common = new BasicDBObject(query.toMap());//资源竞争查询
+                    findCommonDataQuery_OnSidistranUpdate(query_4_common);
+
+                    //开始竞争update资源
+                    boolean win = false;
+                    int turn = 1;
+                    long lastCount = 0;
+                    //每个update事务，都要去竞争目标资源
+                    //修改目标资源的u_txid为当前事务。
+                    while(!win) {
+                        WriteResult wr = super.update(query_4_common, update_4_common, false, true, WriteConcern.ACKNOWLEDGED, encoder);
+                        long count = lastCount+wr.getN();
+                        //判断是否赢了
+                        win = count == findCount;
+                        if(win){
+                            break;
+                        }else{
+                            if(turn==1&&wr.getN()==0){ //第一轮就没竞争到就输
+                                throw new SidistranMongoCuccrentException("could not serialize access due to concurrent update." +
+                                    " cur.txid=" + txid);
+                            }else if(
+                                ((findCount % 2 == 0)&&(count<findCount/2)) //如果是偶数个资源，那么小于一半也输
+                                    ||
+                                    ((findCount % 2>0)&&(count<findCount/2+1))//如果是奇数个资源，那么小于一半也输
+                                ){
+                                proRollback(encoder); //放弃抢占的资源
+                                throw new SidistranMongoCuccrentException("could not serialize access due to concurrent update." +
+                                    " cur.txid=" + txid);
+                            }else{
+                                //只有赢家会胜出
+                                lastCount += wr.getN();
+                            }
+                        }
+                        turn++;
+                    }
+
+                    //复制快照数据
+                    //TODO：也许有一个更好的办法来处理快照。可以试试setOnInsert
+                    //@see https://docs.mongodb.org/manual/reference/operator/update/setOnInsert/#up._S_setOnInsert
+                    if(list.size()>0) {
+                        super.insert(list, new InsertOptions().writeConcern(aWriteConcern).dbEncoder(encoder));
+                    }
+
+                    if (logger.isDebugEnabled()) {
+                        logger.debug("SidistranDBCollection在事务环境下update，快照处理完成，time=" + (System.currentTimeMillis() - time));
                     }
                 }
 
@@ -493,59 +692,266 @@ public class SidistranDBCollection extends DBCollection {
                 //这里需要的是对remove的处理。如果是当前事务中的insert数据、update数据，直接用原始请求更新即可
                 if (updateType == UpdateType.REMOVE) {
                     update = this.getRemoveUpdateObj();
+                } else {
+                    //对update进行处理，如果里面包含唯一键的字段，则需要把Fields.UNIQUE_去掉，如果出现报错，说明唯一键冲突
+                    uniqueIndexFieldProcess(update, true);
                 }
                 MongoTanscationManager.current().addTransactionTargetIfAbsent(this);
-                return super.update(query, update, upsert, multi, aWriteConcern, encoder);
+                result = super.update(query, update, upsert, multi, aWriteConcern, encoder);
+                return result;
             } else {
+//                //如果是upsert，则需要单独处理
+//                if (upsert) {
+//                    //原汁原味调用
+//                    long count = super.find(query, new BasicDBObject("_id", 1)).limit(1).count();
+//                    if(count==0){
+//                        DBObject dbObject = this.findAndModify(query, null, null, false, update, true, true, aWriteConcern);
+//                        WriteResult result = new WriteResult(1, true, dbObject.get("_id"));
+//                        return result;
+//                    }
+//                }
                 //普通情况下，直接执行
                 commonQueryAdapt(query);
-                return super.update(query, update, upsert, multi, aWriteConcern, encoder);
+                uniqueIndexFieldProcess(update, false);
+                result = super.update(query, update, upsert, multi, aWriteConcern, encoder);
+                return result;
             }
-        }catch (Exception e){
-            if(MongoTanscationManager.hasTransaction()){
+        } catch (Exception e) {
+            if (MongoTanscationManager.hasTransaction()) {
                 MongoTanscationManager.current().onError(e);
             }
             throw e;
         } finally {
-            readWriteLock.readLock().unlock();
+            //readWriteLock.readLock().unlock();
+            if(result!=null&&result.getUpsertedId()!=null){
+                super.findAndModify(
+                    new BasicDBObject(ID_FIELD_NAME, result.getUpsertedId()),
+                    null, null, false,
+                    new BasicDBObject("$set", new BasicDBObject(id_f, result.getUpsertedId())),
+                    false, false, WriteConcern.ACKNOWLEDGED);
+            }
+        }
+    }
+
+    @Override
+    public DBObject findAndModify(DBObject query, DBObject fields, DBObject sort,
+                                  boolean  remove,DBObject update, boolean  returnNew,
+                                  boolean  upsert,
+                                  WriteConcern writeConcern){
+        if(fields==null){
+            fields = new BasicDBObject();
+        }
+        findAndModifyAdapt(query, fields, sort, remove, update, upsert);
+        DBObject dbObject = super.findAndModify(query, fields, sort, remove, update, returnNew, upsert, writeConcern);
+        updateResult(dbObject);
+        return dbObject;
+    }
+
+    @Override
+    public DBObject findAndModify(DBObject query, DBObject fields, DBObject sort,
+                                  boolean  remove,DBObject update, boolean  returnNew,
+                                  boolean  upsert,
+                                  long maxTime, TimeUnit maxTimeUnit) {
+        if(fields==null){
+            fields = new BasicDBObject();
+        }
+        findAndModifyAdapt(query, fields, sort, remove, update, upsert);
+        DBObject dbObject =  super.findAndModify(query, fields, sort, remove, update, returnNew, upsert, maxTime, maxTimeUnit);
+        updateResult(dbObject);
+        return dbObject;
+    }
+
+    @Override
+    public DBObject findAndModify(DBObject query, DBObject fields, DBObject sort,
+                                  boolean  remove,DBObject update, boolean  returnNew,
+                                  boolean  upsert,
+                                  long maxTime, TimeUnit maxTimeUnit, WriteConcern writeConcern) {
+        if(fields==null){
+            fields = new BasicDBObject();
+        }
+        findAndModifyAdapt(query, fields, sort, remove, update, upsert);
+        DBObject o = super.findAndModify(query, fields, sort, remove, update, returnNew, upsert, maxTime, maxTimeUnit, writeConcern);
+        updateResult(o);
+        return o;
+    }
+
+    @Override
+    public DBObject findAndModify(DBObject query, DBObject fields, DBObject sort,
+                                  boolean  remove,DBObject update, boolean  returnNew,
+                                  boolean  upsert,
+                                  boolean bypassDocumentValidation, long maxTime, TimeUnit maxTimeUnit) {
+        if(fields==null){
+            fields = new BasicDBObject();
+        }
+        findAndModifyAdapt(query, fields, sort, remove, update, upsert);
+        DBObject o = super.findAndModify(query, fields, sort, remove, update, returnNew, upsert,
+            bypassDocumentValidation, maxTime, maxTimeUnit);
+        updateResult(o);
+        return o;
+    }
+
+    @Override
+    public DBObject findAndModify(DBObject query, DBObject fields, DBObject sort,
+                                  boolean  remove,DBObject update, boolean  returnNew,
+                                  boolean  upsert,
+                                  boolean bypassDocumentValidation, long maxTime,
+                                  TimeUnit maxTimeUnit,   WriteConcern writeConcern) {
+        if(fields==null){
+            fields = new BasicDBObject();
+        }
+        findAndModifyAdapt(query, fields, sort, remove, update, upsert);
+        DBObject o = super.findAndModify(query, fields, sort, remove, update, returnNew, upsert,
+            bypassDocumentValidation, maxTime, maxTimeUnit, writeConcern);
+        updateResult(o);
+        return o;
+    }
+
+    private void findAndModifyAdapt(DBObject query, DBObject fields, DBObject sort,
+                                    boolean  remove,DBObject update, boolean upsert){
+        projectionAdapt(fields);
+        if (MongoTanscationManager.hasTransaction()) {
+            //事务可见性处理
+            sidistranQueryAdapt(query);
+
+            long txid = MongoTanscationManager.txid_AtThisContext();
+            //对原始数据增加事务标识
+            DBObject update_4_common = this.getOriDataUpdateObj();//增加事务标识
+            DBObject query_4_common = new BasicDBObject(query.toMap());//clone一个出来
+            findCommonDataQuery_OnSidistranUpdate(query_4_common);
+
+            DBObject dbObject = super.findAndModify(query, fields, sort, false, update_4_common, true, false, this.getWriteConcern());
+            if (dbObject == null) {
+                //如果returnNew==null，说明已经被其他事务更新了
+                throw new SidistranMongoCuccrentException("could not serialize access due to concurrent update." +
+                    " cur.txid=" + txid + " , _id=" + dbObject.get("_id"));
+            }
+
+            if (!remove) {
+                //如果不删除，则生成快照
+                BasicDBObject body = new BasicDBObject();
+                dbObject.put(Fields.ADDITIONAL_BODY, body);
+                body.put(Fields.TXID_FILED_NAME, txid);
+                body.put(Fields.STAT_FILED_NAME, Values.INSERT_NEW_STAT);
+                body.put(Fields.UPDATE_FROM_NAME, dbObject.get("_id"));
+                //这个字段用来避免唯一键冲突
+                //@see this.refreshUniqueFields();
+                dbObject.put(Fields.UNIQUE_, Values.UNIQUE_VAL_SNAPSHOT);
+                dbObject.removeField("_id");
+                super.insert(dbObject, this.getWriteConcern());
+            }
+
+            //对update进行处理，如果里面包含唯一键的字段，则需要把Fields.UNIQUE_去掉，如果出现报错，说明唯一键冲突
+            uniqueIndexFieldProcess(update, true);
+            MongoTanscationManager.current().addTransactionTargetIfAbsent(this);
+        } else {
+            commonQueryAdapt(query);
+            uniqueIndexFieldProcess(update, false);
         }
     }
     //endregion
 
     //region ----------------aggregate-----------------------
     @Override
-    public Cursor aggregate(final List<? extends DBObject> pipeline, final AggregationOptions options,
-                            final ReadPreference readPreference) {
-        if(MongoTanscationManager.hasTransaction()){
+    public Cursor aggregate(List<? extends DBObject> pipeline, AggregationOptions options,
+                            ReadPreference readPreference) {
+        if (MongoTanscationManager.hasTransaction()) {
             pipeLineAdapt(pipeline, true);
-        }else{
+        } else {
             pipeLineAdapt(pipeline, false);
         }
+
         try {
-            readWriteLock.readLock().lock();
-            return super.aggregate(pipeline, options, readPreference);
+            //readWriteLock.readLock().lock();
+            Cursor cursor = super.aggregate(pipeline, options, readPreference);
+            return new SidistranDBCursor(this, cursor);
         }finally {
-            readWriteLock.readLock().unlock();
+            //readWriteLock.readLock().unlock();
         }
     }
 
     @Override
-    public AggregationOutput aggregate(final List<? extends DBObject> pipeline, final ReadPreference readPreference) {
-        if(MongoTanscationManager.hasTransaction()){
-            pipeLineAdapt(pipeline, true);
-        }else{
-            pipeLineAdapt(pipeline, false);
-        }
+    public AggregationOutput aggregate(List<? extends DBObject> pipeline, ReadPreference readPreference) {
         try {
-            readWriteLock.readLock().lock();
-            return super.aggregate(pipeline, readPreference);
+            //readWriteLock.readLock().lock();
+            AggregationOutput output = super.aggregate(pipeline, readPreference);
+            Iterator<DBObject> itr = output.results().iterator();
+            while(itr.hasNext()){
+                updateResult(itr.next());
+            }
+            return output;
         }finally {
-            readWriteLock.readLock().unlock();
+            //readWriteLock.readLock().unlock();
         }
     }
     //endregion
 
     //region =--===================查询适配方法，史无前例的华丽分割线--------===========
+
+    /**
+     * @see com.sobey.jcg.sobeyhive.sidistran.mongo2.SidistranDBCursor
+     * @param object
+     */
+    void updateResult(DBObject object){
+        if(object==null) return;
+
+        boolean has_ID = false;
+        Object oid = object.get(ID_FIELD_NAME);
+        try {
+            if (object.get(Fields.ADDITIONAL_BODY) != null) {
+                DBObject body = (DBObject) object.get(Fields.ADDITIONAL_BODY);
+                Object _id = body.get(Fields.ID_FIELD);
+                if (_id != null) {
+                    has_ID = true;
+                    object.put("_id", _id); //替换_id为__s_id
+                }
+                object.removeField(Fields.ADDITIONAL_BODY);
+            }
+            return;
+        }finally {
+            if(!has_ID){
+                //如果没有__s_id，则说明可能是历史的collection替换成了sidisitran-collection,。
+                //这些历史数据是没有__s_id的。
+                //这里在查询出来之后加载上这个字段
+                //因为一般来说，是不可能无缘无故采用“_id"来做查询的。用"_id"来查询的情况，肯定是已经通过某些条件查询出来之后，才会用
+                //因此，能走到这里的，都是采用“非_id的正常查询”查询之后，得到的结果
+                try {
+                    super.findAndModify(
+                        new BasicDBObject(ID_FIELD_NAME, oid),
+                        null, null, false,
+                        new BasicDBObject("$set", new BasicDBObject(id_f, oid)),
+                        false, false, WriteConcern.ACKNOWLEDGED);
+                }catch (MongoCommandException e){
+                    if(e.getCode()==61){
+                        String shardKey = CollectionListConfiger.getShardKey(this.getDB().getName(), this.getName());
+                        if (StringUtils.isEmpty(shardKey)) {
+                            throw new UnsupportedOperationException("Sidistran环境下进行__s_id补录，当前Collection["
+                                +this.getName()+"]的ShardKey的没有在sidistran_collections.properties中配置");
+                        }
+                        String[] keys = shardKey.split("\\.");
+                        Object value = object.get(keys[0]);
+                        if(value!=null){
+                            for(int i=1; i<keys.length; i++){
+                                if(value!=null&&value instanceof DBObject) {
+                                    value = ((DBObject)value).get(keys[i]);
+                                }
+                            }
+                        }
+                        if(value==null){
+                            throw new UnsupportedOperationException("当前Collection["+this.getName()
+                                +"]的ShardKey["+shardKey+"]的值为空");
+                        }
+                        super.findAndModify(
+                            new BasicDBObject(shardKey, value),
+                            null, null, false,
+                            new BasicDBObject("$set", new BasicDBObject(id_f, oid)),
+                            false, false, WriteConcern.ACKNOWLEDGED);
+                    }
+                }
+            }
+        }
+    }
+
+
     /**
      * 在非sidistran的情况下，普通查询的内容：
      * 就是那些已经提交过的数据
@@ -561,7 +967,7 @@ public class SidistranDBCollection extends DBCollection {
      */
     private void commonQueryAdapt(DBObject query){
         if(logger.isDebugEnabled()){
-            logger.debug("SidistranDBCollection【非事务】环境原始请求："+query);
+            logger.debug("SidistranDBCollection【非事务】环境原始请求：" + query);
         }
         DBObject con = new BasicDBObject(stat_f, Values.COMMITED_STAT)
             .append(db_time_f, Long.MAX_VALUE);
@@ -622,37 +1028,17 @@ public class SidistranDBCollection extends DBCollection {
      */
     private void sidistranQueryAdapt(DBObject query){
         if(logger.isDebugEnabled()){
-            logger.debug("SidistranDBCollection在【事务环境】下原始请求："+query);
+            logger.debug("SidistranDBCollection在【事务环境】下原始请求：" + query);
         }
         long txid = MongoTanscationManager.txid_AtThisContext();
         long time = MongoTanscationManager.current().getTx_time();
 
-//        String updateByField = Fields.ADDITIONAL_BODY+"."+Fields.UPDATEBY_TXID_NAME
-//            +".txid_"+txid;
-//        DBObject con = new BasicDBObject()
-//            .append("$or", new BasicDBObject[]{
-//                new BasicDBObject(stat_f, Values.COMMITED_STAT)
-//                    .append(txid_f, new BasicDBObject(QueryOperators.LT, txid))
-//                    .append(u_by_f, new BasicDBObject(QueryOperators.NE, txid))
-//                    .append(db_time_f, new BasicDBObject(QueryOperators.EXISTS, false)),
-//                new BasicDBObject(stat_f, Values.COMMITED_STAT)
-//                    .append(txid_f, new BasicDBObject(QueryOperators.LT, txid))
-//                    .append(u_by_f, new BasicDBObject(QueryOperators.GT, txid))
-//                    .append(db_time_f, new BasicDBObject(QueryOperators.GT, time)),
-//                new BasicDBObject(stat_f, Values.COMMITED_STAT)
-//                    .append(txid_f, new BasicDBObject(QueryOperators.LT, txid))
-//                    .append(u_by_f, new BasicDBObject(QueryOperators.LT, txid))
-//                    .append(db_time_f, new BasicDBObject(QueryOperators.GT, time)),
-//                new BasicDBObject(txid_f, txid)
-//                    .append(stat_f, Values.INSERT_NEW_STAT)
-//            });
-
         DBObject con = new BasicDBObject()
             .append("$or", new BasicDBObject[]{
                 new BasicDBObject(stat_f, Values.COMMITED_STAT)
-                          .append(txid_f, new BasicDBObject(QueryOperators.LT, txid))
-                          .append(u_by_f, new BasicDBObject(QueryOperators.NE, txid))
-                          .append(db_time_f, new BasicDBObject(QueryOperators.GT, time))
+                    .append(txid_f, new BasicDBObject(QueryOperators.LT, txid))
+                    .append(u_by_f, new BasicDBObject(QueryOperators.NE, txid))
+                    .append(db_time_f, new BasicDBObject(QueryOperators.GT, time))
                 ,
                 new BasicDBObject(txid_f, txid).append(stat_f, Values.INSERT_NEW_STAT)
             });
@@ -734,25 +1120,46 @@ public class SidistranDBCollection extends DBCollection {
         long txid = MongoTanscationManager.txid_AtThisContext();
 
         DBObject con = new BasicDBObject(stat_f, Values.COMMITED_STAT)
-                    .append(txid_f, new BasicDBObject(QueryOperators.LT, txid))
-                    .append(u_by_f, -1l);
-            //.append(db_time_f, new BasicDBObject(QueryOperators.EXISTS, false));
+            .append(txid_f, new BasicDBObject(QueryOperators.LT, txid))
+            .append(u_by_f, -1l);
+        //.append(db_time_f, new BasicDBObject(QueryOperators.EXISTS, false));
         queryAdapt(query, con);
     }
 
 
     //主要的逻辑点在于：query的第一层，可能存在一个and，也可能不存在。
     private void queryAdapt(DBObject query, DBObject con){
+        //处理ID的映射关系
+        sidistranQueryIDProcess(query);
+
         //这里修改条件，只看query这个json的【最外层】，其他里面不管是否有and，都与此无关。
         if(query.containsField("$and")){
-            Object[] con_in_and = (Object[])query.get("$and");
-            //看看这个and里面是否已经包含该条件
-            int i = Arrays.binarySearch(con_in_and, con, conditin_in_and_Finder);
-            if(i<0){
-                //不存在,则在and里面加一个就行了。
-                //否则就说明已经有了
-                con_in_and = ArrayUtils.add(con_in_and, con);
-                query.put("$and", con_in_and);
+            Object and =  query.get("$and");
+            try {
+                Object[] con_in_and = (Object[]) and;
+                //看看这个and里面是否已经包含该条件
+                int i = Arrays.binarySearch(con_in_and, con, conditin_in_and_Finder);
+                if (i < 0) {
+                    //不存在,则在and里面加一个就行了。
+                    //否则就说明已经有了
+                    con_in_and = ArrayUtils.add(con_in_and, con);
+                    query.put("$and", con_in_and);
+                }
+            }catch (ClassCastException e){
+                if(and instanceof BasicDBList){
+                    boolean find = false;
+                    for(Iterator itr = ((BasicDBList)and).iterator();
+                        itr.hasNext();){
+                        Object o = itr.next();
+                        if((o instanceof DBObject)&&o.equals(con)) {
+                            find = true;
+                            break;
+                        }
+                    }
+                    if(!find){
+                        ((BasicDBList)and).add(con);
+                    }
+                }
             }
         }else{
             //没得and,那就加一个and到条件冲
@@ -764,7 +1171,7 @@ public class SidistranDBCollection extends DBCollection {
     @Deprecated
     private void updateOr(Object[] or, BasicDBObject con){
         for(Object o1 : or){
-             if (o1 instanceof Map){
+            if (o1 instanceof Map){
                 Map o = (Map)o1;
                 if(o.containsKey("$and")){
                     Object[] and = (Object[])o.get("$and");
@@ -799,8 +1206,26 @@ public class SidistranDBCollection extends DBCollection {
      * @param projection
      */
     private void projectionAdapt(DBObject projection){
-        if(!projection.containsField(Fields.ADDITIONAL_BODY)){
-            projection.put(Fields.ADDITIONAL_BODY, false);
+        if(projection.keySet().size()>0){
+            String key = projection.keySet().iterator().next();
+            Object val = projection.get(key);
+            if(((val instanceof Boolean)&&((Boolean)val).booleanValue())
+                ||((val instanceof Number)&&((Number)val).intValue()==1)){
+                return;
+            }
+        }
+
+        if(!projection.containsField(stat_f)){
+            projection.put(stat_f, false);
+        }
+        if(!projection.containsField(txid_f)){
+            projection.put(txid_f, false);
+        }
+        if(!projection.containsField(u_by_f)){
+            projection.put(u_by_f, false);
+        }
+        if(!projection.containsField(db_time_f)){
+            projection.put(db_time_f, false);
         }
         if(!projection.containsField(Fields.UNIQUE_)){
             projection.put(Fields.UNIQUE_, false);
@@ -848,6 +1273,182 @@ public class SidistranDBCollection extends DBCollection {
         }
     }
 
+
+    /**
+     * 在Sidistran处理的collection中，
+     * _id在写入的时候都被转换成了__s_._id，在查询返回的_id时候，都使用__s_._id来返回
+     *
+     * 因此，查询的时候，需要处理这个条件
+     * @param query
+     */
+    private void sidistranQueryIDProcess(DBObject query){
+        if(query.containsField("_id")){
+            Object o = query.removeField("_id");
+            query.put(id_f, o);
+        }
+
+        Object subQueries = query.get("$and");
+        if(subQueries!=null) {
+            if (subQueries instanceof Object[]) {
+                if (((Object[])subQueries).length > 0) {
+                    for (Object subQuery : ((Object[])subQueries)) {
+                        sidistranQueryIDProcess((DBObject) subQuery);
+                    }
+                }
+            }else if(subQueries instanceof BasicDBList){
+                for(Iterator itr = ((BasicDBList) subQueries).iterator();
+                    itr.hasNext();){
+                    sidistranQueryIDProcess((DBObject)itr.next());
+                }
+            }
+        }
+
+        subQueries = query.get("$or");
+        if(subQueries!=null) {
+            if (subQueries instanceof Object[]) {
+                if (((Object[])subQueries).length > 0) {
+                    for (Object subQuery : ((Object[])subQueries)) {
+                        sidistranQueryIDProcess((DBObject) subQuery);
+                    }
+                }
+            }else if(subQueries instanceof BasicDBList){
+                for(Iterator itr = ((BasicDBList) subQueries).iterator();
+                    itr.hasNext();){
+                    Object o = itr.next();
+                    if(o instanceof DBObject) {
+                        sidistranQueryIDProcess((DBObject) itr.next());
+                    }
+                }
+            }
+        }
+    }
+
+
+    /**
+     * 对update进行处理。
+     * 在事务环境下，update的对象是那些：1、snapshot；2、insert的
+     *
+     * snapshot数据设置了Field.UNIQUE_字段为1——通过{@see this.refreshUniqueFields()}可以知道，这个字段是用来
+     * 把已有的唯一键区分开的字段——这样一来，snapshot数据不会和原始数据出现唯一键冲突
+     *
+     * insert的数据，没有设置Field.UNIQUE_字段，如果出现唯一键冲突，那么直接就回滚了，这是合理的。
+     *
+     * 因此，现在update所面对的数据，要么是snapshot，要么是insert的无冲突数据。
+     *
+     * 在update的时候，可能会set某些字段，而这些字段恰好是唯一键对应的字段，
+     * 那么，这里就需要处理：
+     *      如果update包含了唯一键字段，那么，就需要unset Field.UNIQUE_字段
+     * 这样的话，如果set的字段和那些原始数据的唯一键字段冲突，就会报错。
+     *
+     * 需要处理的update内容有这些：
+     * {@see https://docs.mongodb.org/manual/reference/operator/update/#id1}
+     *
+     * $inc	        Increments the value of the field by the specified amount.
+     * $mul	        Multiplies the value of the field by the specified amount.
+     * $rename	    Renames a field.
+     * $set	        Sets the value of a field in a document.
+     * $unset	    Removes the specified field from a document.
+     * $min	        Only updates the field if the specified value is less than the existing field value.
+     * $max         Only updates the field if the specified value is greater than the existing field value.
+     * $currentDate	Sets the value of a field to current date, either as a Date or a Timestamp.
+     *
+     * $addToSet	Adds elements to an array only if they do not already exist in the set.
+     * $pop	        Removes the first or last item of an array.
+     * $pullAll	    Removes all matching values from an array.
+     * $pull	    Removes all array elements that match a specified query.
+     * $pushAll	    Deprecated. Adds several items to an array.
+     * $push        Adds an item to an array.
+     *
+     * 要么，就是直接的替换式update
+     *
+     * @param update
+     */
+    private void uniqueIndexFieldProcess(DBObject update, boolean sidistran){
+        if(logger.isDebugEnabled()){
+            logger.debug("SidistranDBCollection在事务环境下update，检测update是否需要处理唯一键字段\n, 当前update为:" + update);
+        }
+
+        boolean updateOP = false;
+        //要么是update操作符
+        out:for(Iterator<String> itr = update.keySet().iterator();
+                itr.hasNext();){
+            String key = itr.next();
+            if(ops.contains(key)){
+                updateOP = true;
+                DBObject updateOPVal = (DBObject)update.get(key);
+                for(Iterator<String> itr_ = updateOPVal.keySet().iterator();
+                    itr_.hasNext();){
+                    String field = itr_.next();
+                    for(Iterator<List<String>> itr_1 = uniqueIndiceFields.values().iterator();
+                        itr_1.hasNext();) {
+                        List<String> fieldsInIndex = itr_1.next();
+                        if (fieldsInIndex.contains(field)) {
+                            DBObject unset = (DBObject) update.get("$unset");
+                            if (unset == null) {
+                                update.put("$unset", new BasicDBObject(Fields.UNIQUE_, ""));
+                            } else {
+                                unset.put(Fields.UNIQUE_, "");
+                            }
+                            if (logger.isDebugEnabled()) {
+                                logger.debug("SidistranDBCollection在事务环境下update，检测到update操作符需要处理唯一键字段:" + field + "\n修改后update为:" + update);
+                            }
+                            break out;
+                        }
+                    }
+                }
+            }
+        }
+
+        //这里开始补充字段。
+        //对于upsert=true的update，走到这里
+        //在事务环境下，状态都应该是new。非事务环境下，保持提交状态
+        //同时，如果update的数据是传入了id的，那么需要继承这个ID
+        if(!updateOP){
+            //要么是全替换式的Bson
+            //这种情况，是全替换document，因此需要补录控制字段。
+            DBObject body;
+            if(sidistran) {
+                body = new BasicDBObject();
+                long txid = MongoTanscationManager.txid_AtThisContext();
+                body.put(Fields.TXID_FILED_NAME, txid);
+                body.put(Fields.STAT_FILED_NAME, Values.INSERT_NEW_STAT);
+            }else{
+                body = new BasicDBObject();
+                body.put(Fields.STAT_FILED_NAME, Values.COMMITED_STAT);
+                body.put(Fields.GARBAGE_TIME_NAME, Long.MAX_VALUE);
+                body.put(Fields.TXID_FILED_NAME, -1l);
+                body.put(Fields.UPDATEBY_TXID_NAME, -1l);
+            }
+            update.put(Fields.ADDITIONAL_BODY, body);
+        }else{
+            //要么就是操作符处理
+            DBObject $set = null;
+            for(Iterator<String> itr = update.keySet().iterator();
+                itr.hasNext();) {
+                String key = itr.next();
+                if (key.equals("$set")) {
+                    $set = (DBObject)update.get(key);
+                    break;
+                }
+            }
+            if($set==null){
+                $set = new BasicDBObject();
+                update.put("$set", $set);
+            }
+
+            if(sidistran) {
+                long txid = MongoTanscationManager.txid_AtThisContext();
+                $set.put(txid_f, txid);
+                $set.put(stat_f, Values.INSERT_NEW_STAT);
+            }else{
+                $set.put(txid_f, -1l);
+                $set.put(stat_f, Values.COMMITED_STAT);
+                $set.put(db_time_f, Long.MAX_VALUE);
+                $set.put(u_by_f, -1l);
+            }
+        }
+    }
+
     /**
      * 对原始数据(stat=2)进行update处理
      * 1.增加当前事务标识，标识事务在update这个数据
@@ -889,14 +1490,15 @@ public class SidistranDBCollection extends DBCollection {
             new BasicDBObject(
                 "$set",
                 new BasicDBObject(stat_f, Values.NEED_TO_REMOVE)
-                .append(Fields.UNIQUE_, UUID.randomUUID().toString()) //避免出现垃圾数据的唯一键冲突
+                    .append(Fields.UNIQUE_, UUID.randomUUID().toString()) //避免出现垃圾数据的唯一键冲突
             ),
             false, true, WriteConcern.ACKNOWLEDGED, dbEncoder
         );
     }
 
     //看看在一组and的条件中，是否已经包含o2代表的条件对象
-    private static final Comparator conditin_in_and_Finder = new  Comparator<Object>() {
+    private static Comparator conditin_in_and_Finder = new  Comparator<Object>() {
+        @Override
         public int compare(Object o1, Object o2) {
             if((o1 instanceof BasicDBObject)&&(o2 instanceof BasicDBObject)
                 &&o1.equals(o2)) {

@@ -1,5 +1,6 @@
 package com.sobey.jcg.sobeyhive.sidistran.mongo2;
 
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
@@ -7,6 +8,7 @@ import com.mongodb.BasicDBObject;
 import com.mongodb.DBCollection;
 import com.mongodb.DBObject;
 import com.mongodb.MongoClient;
+import com.mongodb.QueryOperators;
 import com.mongodb.WriteConcern;
 import com.sobey.jcg.sobeyhive.sidistran.mongo2.ex.LockTimeOutException;
 
@@ -33,11 +35,10 @@ import com.sobey.jcg.sobeyhive.sidistran.mongo2.ex.LockTimeOutException;
  * 稍加改造，就可以实现不同Collection的读写锁，也就是支持多把锁
  */
 class MongoReadWriteLock {
-    private static String mongoDataID = "lock";
-    private static String dummyField = "_dummy";
-    private static String lockField = "write_lock";
-    private static String readCountField = "read_count";
-    private static String ownerField = "write_onwer";
+    private static String locktype_field = "locktype";
+    private static String write_lock = "write_lock";
+    private static String read_lock = "read_lock";
+    private static String ownerField = "owner";
     //单例缓存
     private static ConcurrentMap<String, MongoReadWriteLock> map = new ConcurrentHashMap();
 
@@ -50,26 +51,29 @@ class MongoReadWriteLock {
             client = ((SidistranMongoClient)client).returnOriClient();
         }
 
-        this.clt = client.getDB(Constants.TRANSACTION_DB).getCollection(Constants.TRANSACTION_UTIL_CLT);
+        this.clt = client.getDB(Constants.TRANSACTION_DB).getCollection(Constants.TRANSACTION_UTIL_LOCK);
         this.clt.setWriteConcern(WriteConcern.MAJORITY);
         this.key = client.getServerAddressList()+""+client.getCredentialsList();
-
-        DBObject dbObject = new BasicDBObject("_id", mongoDataID);
-        long count = this.clt.getCount(dbObject);
-        if(count==0) {
-            synchronized (key.intern()) {
-                dbObject = new BasicDBObject("_id", mongoDataID);
-                count = this.clt.getCount(dbObject);
-                if (count == 0) {
-                    dbObject = new BasicDBObject("_id", mongoDataID)
-                        .append(readCountField, 0l)
-                        .append(dummyField, 0l)
-                        .append(lockField, false)
-                        .append(ownerField, "-1");
-                    this.clt.insert(dbObject, WriteConcern.ACKNOWLEDGED);
+        new Thread(){
+            public void run(){
+                try{
+                    List<DBObject> indices = clt.getIndexInfo();
+                    boolean hasIndex = false;
+                    for(DBObject dbObject : indices) {
+                        String name = (String) dbObject.get("name");
+                        if (name.equals("locktype_owner")) { //"__s_stat__s_g_time"
+                            hasIndex = true;
+                            break;
+                        }
+                    }
+                    if(!hasIndex) {
+                        clt.createIndex(new BasicDBObject(locktype_field, 1).append(ownerField, 1)
+                            , new BasicDBObject("background", true).append("name", "locktype_owner"));
+                    }
+                }catch (Exception e){
                 }
             }
-        }
+        }.start();
     }
 
     /**
@@ -141,78 +145,61 @@ class MongoReadWriteLock {
     }
 
     //---------------------基于mongodb的实现------------------
-    private DBObject read(){
-        BasicDBObject lockQuery = new BasicDBObject("_id", mongoDataID);
-        BasicDBObject update = new BasicDBObject("$inc", new BasicDBObject(dummyField, 1l));
-        DBObject dbObject = clt.findAndModify(lockQuery, null, null, false, update, true, false);
-        if(((Long)dbObject.get(dummyField)).longValue()==Long.MAX_VALUE){
-            update = new BasicDBObject("$set", new BasicDBObject(dummyField, 0l));
-            clt.findAndModify(lockQuery, null, null, false, update, true, false);
-        }
-        return dbObject;
+    //获取读数量
+    long readCount(){
+        String owner =  key+"_"+Thread.currentThread().getName();
+        return clt.count(new BasicDBObject(locktype_field, read_lock)
+            .append(ownerField, new BasicDBObject(QueryOperators.NE, owner)));
     }
+
+    void addReadLock(){
+        String owner =  key+"_"+Thread.currentThread().getName();
+        clt.insert(new BasicDBObject(locktype_field, read_lock).append(ownerField, owner));
+    }
+
+    void removeReadLock(){
+        String owner =  key+"_"+Thread.currentThread().getName();
+        clt.remove(new BasicDBObject(locktype_field, read_lock).append(ownerField, owner));
+    }
+
     //获取写锁
     boolean aquireWriteLock(){
-        String onwer =  key+"_"+Thread.currentThread().getName();
-        BasicDBObject lockQuery = new BasicDBObject("_id", mongoDataID)
-            .append("$or", new BasicDBObject[]{new BasicDBObject(lockField, false), new BasicDBObject(ownerField, onwer)});
-        BasicDBObject lockUpdate = new BasicDBObject("$set",
-            new BasicDBObject(lockField, true).append(ownerField, onwer));
-        //期待把这个字段的false改成true
-        DBObject dbObject = clt.findAndModify(lockQuery, null, null, false, lockUpdate, true, false);
-        //如果已经是true，则找不到，说明没改起
-        if(dbObject==null){
-            return false;
+        String owner =  key+"_"+Thread.currentThread().getName();
+        try{
+            clt.insert(new BasicDBObject("_id", write_lock).append(ownerField, owner));
+            return true;
+        }catch (Exception e){
+            if(e instanceof com.mongodb.DuplicateKeyException){
+                return false;
+            }else{
+                if(e instanceof RuntimeException){
+                    throw (RuntimeException)e;
+                }else{
+                    throw new RuntimeException(e);
+                }
+            }
         }
-        //否则，就说明找到了，此时应该返回修改后的数据，也就是true
-        return (Boolean)dbObject.get(lockField);
     }
 
     //判断是否写锁已加锁
     boolean isWriteLocked(){
-        DBObject dbObject = read();
+        DBObject dbObject = clt.findOne(new BasicDBObject("_id", write_lock));
+        if(dbObject==null){
+            return false;
+        }
         String owner_ = dbObject.get(ownerField)!=null?dbObject.get(ownerField).toString():"";
         String owner =  key+"_"+Thread.currentThread().getName();
         if(owner_.equals(owner)){
             return false;
         }else{
-            return (Boolean)dbObject.get(lockField);
+            return true;
         }
-    }
-
-    //获取读数量
-    long readCount(){
-        DBObject dbObject = read();
-        return (Long)dbObject.get(readCountField);
-    }
-
-    //增加写数量
-    void incReadCount(){
-        BasicDBObject lockQuery = new BasicDBObject("_id", mongoDataID);
-        BasicDBObject update = new BasicDBObject("$inc", new BasicDBObject(readCountField, 1l));
-        clt.findAndModify(lockQuery, null, null, false, update, false, false);
-    }
-
-    //减少写数量
-    void decReadCount(){
-        BasicDBObject lockQuery = new BasicDBObject("_id", mongoDataID);
-        BasicDBObject update = new BasicDBObject("$inc", new BasicDBObject(readCountField, -1l));
-        clt.findAndModify(lockQuery, null, null, false, update, false, false);
-    }
-
-    //重置读
-    void unlockRead(){
-        BasicDBObject lockQuery = new BasicDBObject("_id", mongoDataID);
-        BasicDBObject update = new BasicDBObject("$set", new BasicDBObject(readCountField, 0l));
-        clt.findAndModify(lockQuery, null, null, false, update, false, false);
     }
 
     //释放写
     void unlockWrite(){
-        //采用findAndModify，修改一个mongo变量
-        BasicDBObject lockQuery = new BasicDBObject("_id", mongoDataID);
-        BasicDBObject update = new BasicDBObject("$set", new BasicDBObject(lockField, false).append(ownerField, ""));
-        clt.findAndModify(lockQuery, null, null, false, update, false, false);
+        String owner =  key+"_"+Thread.currentThread().getName();
+        clt.remove(new BasicDBObject("_id", write_lock).append(ownerField, owner));
     }
 
     //---------------------------------两个实现////////////////////
@@ -220,7 +207,7 @@ class MongoReadWriteLock {
     //写锁
     class MonWriteLock{
         long timeout = -1l;
-        int ref = 0;
+        volatile int ref = 0;
 
         private MonWriteLock(long timeout){
             this.timeout = timeout;
@@ -237,15 +224,9 @@ class MongoReadWriteLock {
         void lock(){
             int time = 0;
             while(true){
-                MonReadLock readLock = readLocal.get();
-                int currentReadLock_C = 0;
-                if(readLock!=null){
-                    currentReadLock_C = readLock.ref;
-                }
-
                 //是当前线程加的读锁，因此直接抢占写锁
                 if(aquireWriteLock()){
-                    while((readCount()-currentReadLock_C)!=0){
+                    while(readCount()!=0){
                         if(this.timeout>0) {
                             if (time >= timeout) {
                                 throw new LockTimeOutException("写超时，等待读锁超时，timeout="+timeout+", thread:"+Thread.currentThread().getName());
@@ -281,7 +262,7 @@ class MongoReadWriteLock {
     //读锁
     class MonReadLock{
         long timeout = -1l;
-        int ref = 0;
+        volatile int ref = 0;
         boolean inc_ed = false;
 
 
@@ -314,7 +295,7 @@ class MongoReadWriteLock {
             }
             incRef();
             if(!inc_ed) {
-                incReadCount();
+                addReadLock();
                 inc_ed = true;
             }
         }
@@ -324,7 +305,7 @@ class MongoReadWriteLock {
             if(ref==0) {
                 readLocal.remove();
                 if(inc_ed) {
-                    decReadCount();
+                    removeReadLock();
                 }
             }
         }

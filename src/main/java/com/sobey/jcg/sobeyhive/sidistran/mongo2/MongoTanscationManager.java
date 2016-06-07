@@ -147,9 +147,6 @@ public final class MongoTanscationManager {
                 //这个判断，说明，当前的处理不支持嵌套事务
                 txid = txIDManager.nextTxID();
                 transaction = newTransactionIfAbsent(txid);
-                if(logger.isDebugEnabled()){
-                    logger.debug("MongoTanscationManager，本地事务开始. txid="+transaction.getTxid());
-                }
             }
             transactionLocal.set(transaction);
         }

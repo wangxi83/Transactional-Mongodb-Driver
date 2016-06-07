@@ -1,0 +1,96 @@
+1.一个数据，增加几个标识来控制
+    @see Constants.java
+    static final String STAT_FILED_NAME = "__s_stat";//状态
+    static final String TXID_FILED_NAME = "__s_c_txid";//事务ID
+    static final String UPDATEBY_TXID_NAME = "__s_u_txid";//更新占用事务ID
+    static final String UPDATE_FROM_NAME = "__s_u_from";//修改标识
+    static final String GARBAGE_TIME_NAME = "__s_g_time";//成为垃圾的时间
+
+    其中，状态有：0新增，2确认, -100待清理
+
+2.数据库原子时钟
+    @see DBTime
+  这是一个数据库时间的唯一向量
+
+
+3.主要控制的数据：
+  1)每个事务，在时间上不可能重复，且在时间上有序
+    T1, T2, T3..... 拥有不同的DBTime，且时间有序
+    @see DBTime
+
+  2)每一个事务，都要去刷新当前的最大事务ID
+    @see MongoTransaction commit()
+    @see MonTxIDManager toggleMaxTxID(txid);
+
+  3)事务在提交和回滚之前，记录为活动事务
+    @see MongoTransactionManager newPersistIfAbsent()
+
+  4)Snapshot
+    在做更新的时候，需要复制一份快照数据
+    @see SidistranDBCollection update()
+
+
+4.可见性逻辑：
+
+  设：当前事务为 T100(dbtime=15)
+  那么，当前事务可见的数据是那些：
+  a)当前事务中，新增的数据
+  {__s_c_txid:T100, __s_stat:0}
+
+  b)或者，那些状态是确认的，创建该条数据的事务小于当前事务，且不存在过期时间的数据
+  {__s_stat: 2, __s_c_txid:{$lt: T100}, __s_c_time:{$exists:false}}
+  比如事务T99提交了一条，那么这一条应该被T100可见
+  而T101提交的，T100是看不到的
+  同时，这里面的__s_stat: 2决定了其他状态一律不可能被看见
+
+  c)或者，那些状态是确认的，创建事务小于当前事务, 修改这些数据的事务大于（或小于）当前事务， 且过期时间大于该事务时间的数据
+  {__s_stat: 2, __s_c_txid:{$lt: T100}, __s_u_txid:{$gt:T100}, __s_c_time:{$gt: 15}}
+  OR
+  {__s_stat: 2, __s_c_txid:{$lt: T100},  __s_u_txid:{$lt:T100}, __s_c_time:{$gt: 15}},
+  比如
+  事务T100修改了数据A，由于3.4的SnapShot的存在，
+  此时，事务T100修改的其实是数据A-SnapShot，对于T100来说，数据A被标注了__s_u_txid:T100，同时，A-SnapShot={__s_stat:0, __s_c_txid:T100}
+
+  此时，数据 A= A{__s_stat: 2, __s_c_txid:T1, __s_u_txid=T100}
+
+  因此，__s_u_txid:{$gt:T100}决定了，下一次重复执行查询的时候，T100是看不到“被修改的原始数据A”的
+  保证了同一事务的查询幂等性
+
+5.数据处理逻辑
+  1)新增的数据，设置__s_c_txid:T100, __s_stat:0
+  2)对于update
+    用update的条件来做一个“原始数据的Snapshot”，这些Snapshot相当于是新增数据, __s_c_txid:T100, __s_stat:0
+    把这些原始数据标识为正在被更新:  __s_u_txid:T100
+    然后，把update的内容作用到这些Snapshot上面
+  3)对于删除，相当于做一个update
+    update的内容为：__s_c_txid:T100, __s_stat:-100
+
+  这样一来，原始数据还在，只是被标注了。
+  事务中处理的数据，相当于处理的是新增数据
+
+  4)提交
+    a)把那些stat=0的，全部变成stat=2
+
+    b)同时，需要把__s_c_txid设置为 当前活动事务中的最大事务ID
+      这样，由于4.b的条件存在
+      {__s_stat: 2, __s_c_txid:{$lt:Tx}, __s_c_time:{$exists:false}}
+      假设T99增加了一个数据 A99{__s_c_txid:T99, __s_stat:0}
+      此时活动事务中最大的是T100
+      当T99提交以后，T100其实是看不到的，因为A99{__s_c_txid:T100, __s_stat:2}
+
+    c)把那些具备修改标识__s_u_from的数据，修改其__s_c_time为当前DBTime--即设置这些数据的过期时间为当前DBTime
+      假设，T98对 数据 A进行了修改。
+      此时活动事务最大的为T100(dbtime=15)
+      那么，在DBTime为16的时候，T98提交，数据为
+      A{__s_stat: 2, __s_c_txid:T10, __s_c_time:16}
+      A'{__s_stat: 2, __s_c_txid:T100}
+      这样，T100是看不到A和A'的
+
+      而，T96(dbtime=10), 是可以看到A的。因为
+      A{__s_stat: 2, __s_c_txid:T10, __s_c_time:16}
+      T96(dbtime=10)的查询条件为
+      {__s_stat: 2, __s_c_txid:{$lt: T96}, __s_u_txid:{$gt:T96}, __s_c_time:{$gt: 10}}
+       OR
+      {__s_stat: 2, __s_c_txid:{$lt: T96}, __s_u_txid:{$lt:T96}, __s_c_time:{$gt: 10}},
+      ----也即：活动事务Tx，能看到那些过期时间在Tx的时间之后的数据
+

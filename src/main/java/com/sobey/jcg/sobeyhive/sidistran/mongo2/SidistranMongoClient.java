@@ -1,14 +1,17 @@
 package com.sobey.jcg.sobeyhive.sidistran.mongo2;
 
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+
+import org.apache.commons.lang.StringUtils;
 
 import com.mongodb.DB;
 import com.mongodb.MongoClient;
 import com.mongodb.MongoClientOptions;
 import com.mongodb.MongoClientURI;
-import com.mongodb.MongoCredential;
 import com.mongodb.ReadPreference;
 import com.mongodb.ServerAddress;
 import com.mongodb.WriteConcern;
@@ -92,6 +95,12 @@ public class SidistranMongoClient extends MongoClient{
     }
 
     //IP+port的排序
+
+    @Override
+    public Collection<DB> getUsedDatabases() {
+        return dbCache.values();
+    }
+
     /**
     private static Comparator<ServerAddress> comparator = new Comparator<ServerAddress>() {
         @Override
@@ -111,27 +120,11 @@ public class SidistranMongoClient extends MongoClient{
         }
     };*/
 
+
+
     //region -------------------构造函数继承-------------
     public SidistranMongoClient() {
         oriClient = new MongoClient();
-    }
-
-    public SidistranMongoClient(String host) {
-        super(host, MongoClientOptions
-            .builder().writeConcern(WriteConcern.ACKNOWLEDGED)
-            .readPreference(ReadPreference.primary()).build());
-        oriClient = new MongoClient(host, MongoClientOptions
-            .builder().writeConcern(WriteConcern.ACKNOWLEDGED)
-            .readPreference(ReadPreference.primary()).build());
-    }
-
-    public SidistranMongoClient(String host, MongoClientOptions options) {
-        super(host, MongoClientOptions.builder(options)
-            .writeConcern(WriteConcern.ACKNOWLEDGED)
-            .readPreference(ReadPreference.primary()).build());
-        oriClient = new MongoClient(host, MongoClientOptions.builder(options)
-            .writeConcern(WriteConcern.ACKNOWLEDGED)
-            .readPreference(ReadPreference.primary()).build());
     }
 
     public SidistranMongoClient(String host, int port) {
@@ -152,31 +145,69 @@ public class SidistranMongoClient extends MongoClient{
             .readPreference(ReadPreference.primary()).build());
     }
 
-    public SidistranMongoClient(ServerAddress addr, List<MongoCredential> credentialsList) {
-        super(addr, credentialsList, MongoClientOptions
+    public SidistranMongoClient(ServerAddress addr, List<SidistranMonCredential> credentials) {
+        super(addr, SidistranMonCredential.toList(credentials), MongoClientOptions
             .builder().writeConcern(WriteConcern.ACKNOWLEDGED)
             .readPreference(ReadPreference.primary()).build());
-        oriClient = new MongoClient(addr, credentialsList, MongoClientOptions
+        oriClient = new MongoClient(addr, SidistranMonCredential.toList(credentials), MongoClientOptions
             .builder().writeConcern(WriteConcern.ACKNOWLEDGED)
             .readPreference(ReadPreference.primary()).build());
     }
 
-    public SidistranMongoClient(ServerAddress addr, MongoClientOptions options) {
-        super(addr, MongoClientOptions.builder(options)
+    public SidistranMongoClient(ServerAddress addr, SidistranMonProperty options) {
+        super(addr, options.builder()
             .writeConcern(WriteConcern.ACKNOWLEDGED)
             .readPreference(ReadPreference.primary()).build());
-        oriClient = new MongoClient(addr, MongoClientOptions.builder(options)
+        oriClient = new MongoClient(addr, options.builder()
             .writeConcern(WriteConcern.ACKNOWLEDGED)
             .readPreference(ReadPreference.primary()).build());
     }
 
-    public SidistranMongoClient(ServerAddress addr, List<MongoCredential> credentialsList, MongoClientOptions options) {
-        super(addr, credentialsList, MongoClientOptions.builder(options)
+    public SidistranMongoClient(ServerAddress addr, List<SidistranMonCredential> credentials, SidistranMonProperty options) {
+        super(addr, SidistranMonCredential.toList(credentials), options.builder()
             .writeConcern(WriteConcern.ACKNOWLEDGED)
             .readPreference(ReadPreference.primary()).build());
-        oriClient = new MongoClient(addr, credentialsList, MongoClientOptions.builder(options)
+        oriClient = new MongoClient(addr, SidistranMonCredential.toList(credentials), options.builder()
             .writeConcern(WriteConcern.ACKNOWLEDGED)
             .readPreference(ReadPreference.primary()).build());
+    }
+
+    public SidistranMongoClient(List<ServerAddress> seeds) {
+        this(seeds, new SidistranMonProperty());
+    }
+
+    public SidistranMongoClient(List<ServerAddress> seeds, List<SidistranMonCredential> credentials) {
+        super(seeds, SidistranMonCredential.toList(credentials), MongoClientOptions.builder()
+            .writeConcern(WriteConcern.ACKNOWLEDGED)
+            .readPreference(ReadPreference.primary()).build());
+        oriClient = new MongoClient(seeds, SidistranMonCredential.toList(credentials), MongoClientOptions.builder()
+            .writeConcern(WriteConcern.ACKNOWLEDGED)
+            .readPreference(ReadPreference.primary()).build());
+    }
+
+    public SidistranMongoClient(List<ServerAddress> seeds, SidistranMonProperty options) {
+        super(seeds, options.builder()
+            .writeConcern(WriteConcern.ACKNOWLEDGED)
+            .readPreference(ReadPreference.primary()).build());
+        oriClient = new MongoClient(seeds, options.builder()
+            .writeConcern(WriteConcern.ACKNOWLEDGED)
+            .readPreference(ReadPreference.primary()).build());
+    }
+
+    public SidistranMongoClient(List<ServerAddress> seeds, List<SidistranMonCredential> credentials, SidistranMonProperty options) {
+        super(seeds, SidistranMonCredential.toList(credentials),
+            options==null
+                ?new SidistranMonProperty().builder()
+                .writeConcern(WriteConcern.ACKNOWLEDGED)
+                .readPreference(ReadPreference.primary()).build()
+                :options.builder().writeConcern(WriteConcern.ACKNOWLEDGED)
+                .readPreference(ReadPreference.primary()).build());
+        oriClient = new MongoClient(seeds, SidistranMonCredential.toList(credentials), options==null
+                ?new SidistranMonProperty().builder()
+                .writeConcern(WriteConcern.ACKNOWLEDGED)
+                .readPreference(ReadPreference.primary()).build()
+                :options.builder().writeConcern(WriteConcern.ACKNOWLEDGED)
+                .readPreference(ReadPreference.primary()).build());
     }
 
     public SidistranMongoClient(MongoClientURI uri) {
@@ -184,6 +215,99 @@ public class SidistranMongoClient extends MongoClient{
             .writeConcern(WriteConcern.ACKNOWLEDGED).readPreference(ReadPreference.primary())));
         oriClient = new MongoClient(new MongoClientURI(uri.toString(), MongoClientOptions.builder(uri.getOptions())
             .writeConcern(WriteConcern.ACKNOWLEDGED).readPreference(ReadPreference.primary())));
+    }
+
+    //mongodb://[username:password@]host1[:port1][,host2[:port2],...[,hostN[:portN]]][/[database][?options]]
+    //[uri]@see https://docs.mongodb.org/manual/reference/connection-string/
+    //[options]@see https://docs.mongodb.org/manual/reference/connection-string/#connections-connection-options
+    public SidistranMongoClient(String uri, SidistranMonProperty options) {
+        this(new MongoClientURI(uri, options!=null?options.builder():new SidistranMonProperty().builder()));
+    }
+
+    //mongodb://[username:password@]host1[:port1][,host2[:port2],...[,hostN[:portN]]][/[database][?options]]
+    //[uri]@see https://docs.mongodb.org/manual/reference/connection-string/
+    //[options]@see https://docs.mongodb.org/manual/reference/connection-string/#connections-connection-options
+    public SidistranMongoClient(String replica_sets, String user, String password, String db,
+                                SidistranMonProperty options) {
+        this(buildURI(replica_sets, user, password, db), options);
+    }
+
+    public SidistranMongoClient(String replica_sets, String credentials,  SidistranMonProperty options) {
+        this(buildSeeds(replica_sets), buildCredentials(credentials), options);
+    }
+
+    //mongo.credentials = sobeyhive:admin@${mongo.db},sobeyhive:admin@transaction
+    static List<SidistranMonCredential> buildCredentials(String credentials) {
+        if (StringUtils.isEmpty(credentials)) {
+            return null;
+        }
+        try {
+            String[] credentialArray = credentials.split(",");
+            if(credentialArray.length==0){
+                return null;
+            }
+            List<SidistranMonCredential> credentialList = new ArrayList<>();
+            for(String credential: credentialArray){
+                String[] item = credential.split("@");
+                if(item.length==0){
+                    throw new Exception();
+                }
+                if(StringUtils.isEmpty(item[0])||StringUtils.isEmpty(item[1])){
+                    throw new Exception();
+                }
+                String[] useAndPwd = item[0].split(":");
+                if(StringUtils.isEmpty(useAndPwd[0])||StringUtils.isEmpty(useAndPwd[1])){
+                    throw new Exception();
+                }
+                SidistranMonCredential credentialobj = new SidistranMonCredential(useAndPwd[0], useAndPwd[1], item[1]);
+                credentialList.add(credentialobj);
+            }
+            return credentialList;
+        }catch (Exception e){
+            throw new IllegalArgumentException("credentials格式不对，应该是：[{user}:{pwd}@{db}[,]]的形式");
+        }
+    }
+
+    //replica_sets = host1[:port1][,host2[:port2]
+    static List<ServerAddress> buildSeeds(String replica_sets){
+        if (StringUtils.isEmpty(replica_sets)) {
+            return null;
+        }
+
+        String[] replica_set_Array = replica_sets.split(",");
+        if(replica_set_Array.length==0){
+            return null;
+        }
+
+        List<ServerAddress> seeds = new ArrayList<>();
+        for(String replica_set : replica_set_Array){
+            String[] item = replica_set.split(":");
+            ServerAddress address = new ServerAddress(item[0], Integer.parseInt(item[1]));
+            seeds.add(address);
+        }
+        return seeds;
+    }
+
+    //replica_sets = host1[:port1][,host2[:port2]
+    static String buildURI(String replica_sets, String user, String password, String db){
+        StringBuilder builder = new StringBuilder("mongodb://");
+        if(StringUtils.isEmpty(replica_sets)){
+            throw new IllegalArgumentException("replica_sets不能為空");
+        }
+        if(!StringUtils.isEmpty(user)){
+            builder.append(user).append(":");
+            if(!StringUtils.isEmpty(password)){
+                builder.append(password);
+            }else{
+                throw new IllegalArgumentException("password不能為空");
+            }
+            builder.append("@");
+        }
+        builder.append(replica_sets);
+        if(!StringUtils.isEmpty(db)){
+            builder.append("/").append(db);
+        }
+        return builder.toString();
     }
     //endregion
 }
