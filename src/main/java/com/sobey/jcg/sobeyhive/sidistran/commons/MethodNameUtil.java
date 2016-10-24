@@ -1,4 +1,4 @@
-package com.sobey.jcg.sobeyhive.sidistran.mongo2.utils;
+package com.sobey.jcg.sobeyhive.sidistran.commons;
 
 import java.lang.reflect.Method;
 

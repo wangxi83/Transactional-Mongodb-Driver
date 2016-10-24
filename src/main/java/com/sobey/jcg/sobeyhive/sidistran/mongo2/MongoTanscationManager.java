@@ -1,19 +1,17 @@
 package com.sobey.jcg.sobeyhive.sidistran.mongo2;
 
+import java.rmi.RemoteException;
 import java.util.List;
+
+import org.apache.commons.lang.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import com.mongodb.BasicDBObject;
 import com.mongodb.DBCollection;
 import com.mongodb.DBObject;
 import com.mongodb.MongoClient;
-//import com.sobey.jcg.sobeyhive.sidistran.ITxManager;
-//import com.sobey.jcg.sobeyhive.sidistran.TxParticipantor;
-//import com.sobey.jcg.sobeyhive.sidistran.commons.InvokerFactory;
-//import com.sobey.jcg.sobeyhive.sidistran.enums.Protocol;
-//import com.sobey.jcg.sobeyhive.sidistran.enums.Type;
-//import com.sobey.jcg.sobeyhive.sidistran.registry.ParticipantReg;
-//import com.sobey.jcg.sobeyhive.sidistran.registry.Reference;
-//import com.sobey.jcg.sobeyhive.sidistran.registry.Who;
+import com.sobey.jcg.sobeyhive.sidistran.ParticipantorCriterion;
 
 /**
  * Created by WX on 2016/1/20.
@@ -39,6 +37,13 @@ import com.mongodb.MongoClient;
  * --------------------------------------
  */
 public final class MongoTanscationManager {
+    public static enum LocalTxType{
+        Local,
+        Nested
+    }
+
+    private static Logger logger = LoggerFactory.getLogger(MongoTanscationManager.class);
+
     private static int refCount = 0;
     private boolean globalTransaction; //是否是分布式事务方式开启管理器
     private MongoClient mongoClient;
@@ -47,15 +52,15 @@ public final class MongoTanscationManager {
     private DBTime dbTime;
     private MonTranshCleaner cleaner;
 
-    //sidistran环境配置
+//    //sidistran环境配置
 //    private SidistranConfig config;
-    //sidistran参与端发布器
+//    //sidistran参与端发布器
 //    private ParticipantorExportor exportor;
 
     //用于保存本地事务
-    private static ThreadLocal<MongoTransaction> transactionLocal = new ThreadLocal<MongoTransaction>();
-    //用于其他地方判断当前上下文是否有事务
-    private static ThreadLocal<Boolean> transactionBoolLocal = new ThreadLocal<>();
+    private static ThreadLocal<MongoTransaction> transactionLocal = new ThreadLocal<>();
+    //用于保存内嵌事务
+    private static ThreadLocal<MongoTransaction> nestedLocal = new ThreadLocal<>();
 
     //字段名
     private static String time_f = "time";
@@ -65,9 +70,11 @@ public final class MongoTanscationManager {
      *
      * @return MongoTransaction
      */
-    static MongoTransaction current() {
+    public static MongoTransaction current() {
         return transactionLocal.get();
     }
+
+
 
     /**
      * 获取当前事务上下文中的txid
@@ -75,11 +82,14 @@ public final class MongoTanscationManager {
      * @return
      */
     public static long txid_AtThisContext() {
-        return transactionLocal.get() != null ? transactionLocal.get().getTxid() : -1;
+        return nestedLocal.get()!=null
+                ?nestedLocal.get().getTxid()
+                :(transactionLocal.get() != null ? transactionLocal.get().getTxid() : -1);
     }
 
     public static boolean hasTransaction() {
-        return transactionBoolLocal.get() != null && transactionBoolLocal.get().booleanValue();
+        return nestedLocal.get()!=null
+            ||transactionLocal.get()!=null;
     }
 
     /**
@@ -92,7 +102,7 @@ public final class MongoTanscationManager {
 //        this.config = config;
 //        globalTransaction = true;
 //        //分布式事务，开启分布式提交入口
-//        initialSidistran();
+////        initialSidistran();
 //    }
 
     /**
@@ -102,7 +112,7 @@ public final class MongoTanscationManager {
     public MongoTanscationManager(MongoClient mongoClient) {
         refCount++;
         if (refCount > 1) {
-            throw new IllegalStateException("实例已经产生，请单例使用");
+            throw new IllegalStateException("实例已经产生，该类只能单例使用");
         }
         globalTransaction = false;
         this.mongoClient = (mongoClient instanceof SidistranMongoClient) ?
@@ -129,6 +139,10 @@ public final class MongoTanscationManager {
         this.txIDManager = MonTxIDManager.getFrom(this.mongoClient);
         this.dbTime = DBTime.getFrom(this.mongoClient);
         this.cleaner = MonTranshCleaner.getFrom(this.mongoClient);
+
+        if(logger.isDebugEnabled()){
+            logger.debug("MongoTanscationManager初始化。");
+        }
     }
 
     public void begin() {
@@ -136,21 +150,53 @@ public final class MongoTanscationManager {
         //设置事务上下文
         MongoTransaction transaction = transactionLocal.get();
         if (transaction == null) {
-            if (GlobalSidistranAware.underSidistran() && globalTransaction) {
+//            if (globalTransaction&&!StringUtils.isEmpty(SidistranMongoAware.getTxID())) {
 //                //分布式
-//                txid = Long.parseLong(GlobalSidistranAware.getTxID());
-//                //刷新本地TXID为最大的全局TXID
-//                txIDManager.doMaxIfNot(txid);
-//                transaction = newSidistranTransactionIfAbsent(txid);
-            } else {
+//                txid = Long.parseLong(SidistranMongoAware.getTxID());
+//                //记录分布式事务给出的ID
+//                txIDManager.toggleLastGlobalTxID(txid);
+//
+//                //生成事务
+//                transaction = newSidistranTransactionIfAbsent(SidistranMongoAware.getTxID());
+//                transactionLocal.set(transaction);
+//                //2016-10-21 wx 消费后立即清除线程变量，否则有多线程隐患
+//                //而且，一旦transactionLocal设置了，在SdisitranDBCollection中始终会识别到
+//                SidistranMongoAware.clear();
+//                if(logger.isDebugEnabled()){
+//                    logger.debug("【sidistran_mongo_txmanger】全局事务开始. tx="+transaction);
+//                }
+//            }else {
                 //本地事务.
-                //这个判断，说明，当前的处理不支持嵌套事务
-                txid = txIDManager.nextTxID();
-                transaction = newTransactionIfAbsent(txid);
+                beginLocal(LocalTxType.Local);
+//            }
+        }else {
+            if (logger.isDebugEnabled()) {
+                logger.debug("【sidistran_mongo_txmanger】当前Manager持有transaction. tx=" + transaction+", 无需开启新事务");
             }
+        }
+        //2016-10-21 wx 消费后立即清除线程变量，否则有多线程隐患
+        //而且，一旦transactionLocal设置了，在SdisitranDBCollection中始终会识别到
+        SidistranMongoAware.clear();
+    }
+
+    public MongoTransaction beginLocal(LocalTxType localTxType){
+        //本地事务.
+        long txid = txIDManager.nextTxID();
+        //看看是不是参与过分布式事务
+        long lastGlobalID = txIDManager.toggleLastGlobalTxID(-1l);
+        if(lastGlobalID>0){
+            txid = ParticipantorCriterion.TxID_Criterion.localTxIDGen(lastGlobalID, txid);
+        }
+        MongoTransaction transaction = newTransactionIfAbsent(txid);
+        if(logger.isDebugEnabled()){
+            logger.debug("【sidistran_mongo_txmanger】本地事务开启. tx="+transaction);
+        }
+        if(localTxType==LocalTxType.Nested) {
+            nestedLocal.set(transaction);
+        }else{
             transactionLocal.set(transaction);
         }
-        transactionBoolLocal.set(new Boolean(true));
+        return transaction;
     }
 
     /**
@@ -165,8 +211,28 @@ public final class MongoTanscationManager {
             }
         }finally {
             //但是类说明中说了，必须要commit，这里要清除
+            String tx = current().toString();
             transactionLocal.remove();
-            transactionBoolLocal.remove();
+            if(logger.isDebugEnabled()){
+                logger.debug("【sidistran_mongo_txmanger】执行提交，移除事务(thread="+Thread.currentThread().getName()
+                    +"), tx="+tx+" , 状态："+(transactionLocal.get()==null));
+            }
+        }
+    }
+
+    public void commintNested(){
+        try {
+            if (nestedLocal.get() != null) {
+                nestedLocal.get().commit();
+            }
+        }finally {
+            //但是类说明中说了，必须要commit，这里要清除
+            String tx = current().toString();
+            nestedLocal.remove();
+            if(logger.isDebugEnabled()){
+                logger.debug("【sidistran_mongo_txmanger】执行内嵌提交，移除事务(thread="+Thread.currentThread().getName()
+                    +"), tx="+tx+" , 状态："+(transactionLocal.get()==null));
+            }
         }
     }
 
@@ -177,7 +243,7 @@ public final class MongoTanscationManager {
 //        //@see GlobalSidistranAware
 //        //只有在GlobalSidistranAware申明了之后，才是分布式事务
 //        //分布式事务需要等待Manager来提交
-//        new SidistranMongoTransaction(Long.parseLong(txid), pid, mongoClient, config.getManagerUrl())
+//        new SidistranMongoTransaction(txid, pid, mongoClient, config.getManagerUrl())
 //            .commit(references);
 //    }
 
@@ -190,8 +256,27 @@ public final class MongoTanscationManager {
                 current().rollback();
             }
         }finally {
+            String tx = current().toString();
             transactionLocal.remove();
-            transactionBoolLocal.remove();
+            if(logger.isDebugEnabled()){
+                logger.debug("【sidistran_mongo_txmanger】执行回滚，移除事务(thread="+Thread.currentThread().getName()
+                    +"), tx="+tx+" , 状态："+(transactionLocal.get()==null));
+            }
+        }
+    }
+
+    public void rollbackNested(){
+        try {
+            if (nestedLocal.get() != null) {
+                nestedLocal.get().rollback();
+            }
+        }finally {
+            String tx = current().toString();
+            nestedLocal.remove();
+            if(logger.isDebugEnabled()){
+                logger.debug("【sidistran_mongo_txmanger】执行内嵌回滚，移除事务(thread="+Thread.currentThread().getName()
+                    +"), tx="+tx+" , 状态："+(transactionLocal.get()==null));
+            }
         }
     }
 
@@ -202,7 +287,7 @@ public final class MongoTanscationManager {
 //        //@see GlobalSidistranAware
 //        //只有在GlobalSidistranAware申明了之后，才是分布式事务
 //        //分布式事务需要等待Manager来提交
-//        new SidistranMongoTransaction(Long.parseLong(txid), pid, mongoClient, config.getManagerUrl())
+//        new SidistranMongoTransaction(txid, pid, mongoClient, config.getManagerUrl())
 //            .rollback(references);
 //    }
 
@@ -210,10 +295,26 @@ public final class MongoTanscationManager {
      * 必须在关闭的时候调用该方法
      */
     public void close(){
-        //if(exportor!=null) {
-        //    exportor.close();
-        //}
+//        if(exportor!=null) {
+//            exportor.close();
+//        }
         cleaner.close();
+    }
+
+    static void transactionOnError(Throwable e){
+        try {
+            if (current() != null) {
+                current().onError(e);
+            }
+        }finally {
+            String tx = current().toString();
+            transactionLocal.remove();
+            nestedLocal.remove();
+            if(logger.isDebugEnabled()){
+                logger.debug("【sidistran_mongo_txmanger】transactionOnError，移除事务(thread="+Thread.currentThread().getName()
+                    +"), tx="+tx+" , 状态："+(transactionLocal.get()==null)+"&&"+(nestedLocal.get()==null));
+            }
+        }
     }
 
 //    private void initialSidistran(){
@@ -221,17 +322,20 @@ public final class MongoTanscationManager {
 //        if(config.getReceiverProtocol()== Protocol.CLASS){
 //            throw new IllegalArgumentException("不支持Class方式的调用");
 //        }
-//        if(config.getReceiverProtocol()!=Protocol.SPRING_BEAN
-//            &&(config.getReceiverPort()<0
-//            || StringUtils.isEmpty(config.getReceiverName())
-//            ||config.getManagerUrl().toLowerCase().startsWith("class")
-//            ||config.getManagerUrl().toLowerCase().startsWith("spring_bean"))){
-//            throw new IllegalArgumentException("SidistranConfig设置协议为"+
-//                config.getReceiverProtocol()+"，但是没有设置正确的地址、端口、服务名");
+//
+//        if(logger.isDebugEnabled()){
+//            logger.debug("MongoTanscationManager配置了【Sidistran环境】，开始初始化上下文...");
 //        }
 //
 //        exportor = ParticipantorExportor.newIfAbsent(this, config);
 //        exportor.publishIfNot();
+//        if(logger.isDebugEnabled()){
+//            logger.debug("【Sidistran环境】，发布参与端完成...");
+//        }
+//
+//        if(logger.isDebugEnabled()){
+//            logger.debug("MongoTanscationManager，【Sidistran环境】初始化完成");
+//        }
 //    }
 
     private MongoTransaction newTransactionIfAbsent(long txid){
@@ -242,26 +346,52 @@ public final class MongoTanscationManager {
         return transaction;
     }
 
-//    private MongoTransaction newSidistranTransactionIfAbsent(long txid){
-//        DBObject result = findTx(txid);
+//    private MongoTransaction newSidistranTransactionIfAbsent(String sidistranTxID){
+//        //对于分布式事务，需要记录本地事务和分布式事务ID
+//        DBObject result = findTx(sidistranTxID);
 //
 //        //分布式，则注册参与端
 //        ITxManager txManager = InvokerFactory.getInvoker(config.getManagerUrl(), ITxManager.class);
 //        ParticipantReg preg = new ParticipantReg();
 //        preg.setType(Type.MONGODB);
-//        preg.setSurroundID(txid + "@"+ mongoClient.getServerAddressList());
-//        preg.setWho(new Who(config.getReceiverProtocol(), config.getRecieverHost(),
-//                config.getReceiverPort(), config.getReceiverName())
-//        );
+//        preg.setSurroundID(result.get("_id") + "@"+ mongoClient.getServerAddressList());
+//        if(!StringUtils.isEmpty(config.getZkUrl())) {
+//            preg.setWho(new Who(ParticipantorCriterion.AS_ZKService.buildMongoZKService(config.getZkUrl())));
+//        }else{
+//            preg.setWho(new Who(config.getReceiverProtocol(), config.getRecieverHost(),
+//                    config.getReceiverPort(), config.getReceiverName())
+//            );
+//        }
 //        //这一段，保证了，随便几个进程，只有第一个进程作为reciever
 //        //因为，type一样，surroundid一样，
-//        String pid = txManager.addParticipantIfAbsent(txid+"", preg);
+//        String pid = txManager.addParticipantIfAbsent(sidistranTxID, preg);
 //
-//        MongoTransaction transaction = new SidistranMongoTransaction(txid, pid, this.mongoClient, config.getManagerUrl());
-//        long time = ((Long)result.get("time")).longValue();
+//        MongoTransaction transaction = new SidistranMongoTransaction(sidistranTxID, pid, this.mongoClient, config.getManagerUrl());
+//        transaction.setTxid(Long.parseLong(result.get("_id").toString()));
+//        long time = ((Long)result.get(time_f)).longValue();
 //        transaction.setTx_time(time);
 //        return transaction;
 //    }
+
+    private DBObject findTx(String sidistranTxID){
+        DBObject query = new BasicDBObject("sidistranTxID", sidistranTxID);
+        long time = dbTime.nextTime();
+        DBObject update =
+            new BasicDBObject("$inc", new BasicDBObject("_dummy", 1l))
+                .append("$setOnInsert", new BasicDBObject(time_f, time));
+
+        DBObject result = this.txCollection.findAndModify(query, null, null, false, update, true, false);
+        if(result==null){
+            //使用global+local来构造一个本地TxID
+            long localTxID = txIDManager.nextTxID();
+            localTxID = ParticipantorCriterion.TxID_Criterion.localTxIDGen(Long.parseLong(sidistranTxID), localTxID);
+
+            result = new BasicDBObject("_id", localTxID)
+                    .append("sidistranTxID", sidistranTxID).append("_dummy", 1l).append(time_f, time);
+            this.txCollection.insert(result);
+        }
+        return result;
+    }
 
     private DBObject findTx(long txid){
         DBObject query = new BasicDBObject("_id", txid);
@@ -270,7 +400,6 @@ public final class MongoTanscationManager {
             new BasicDBObject("$inc", new BasicDBObject("_dummy", 1l))
                 .append("$setOnInsert", new BasicDBObject(time_f, time));
 
-        DBObject result = this.txCollection.findAndModify(query, null, null, false, update, true, true);
-        return result;
+        return this.txCollection.findAndModify(query, null, null, false, update, true, true);
     }
 }

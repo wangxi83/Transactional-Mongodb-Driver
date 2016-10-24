@@ -10,6 +10,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
+import org.apache.commons.collections.CollectionUtils;
 import org.apache.commons.lang.ArrayUtils;
 import org.apache.commons.lang.StringUtils;
 import org.apache.commons.lang.reflect.MethodUtils;
@@ -270,37 +271,52 @@ public class SidistranDBCollection extends DBCollection {
             unique = (Boolean) options.get("unique");
         }catch (ClassCastException e){
             Integer i = (Integer) options.get("unique");
-            unique = i.intValue()==1?new Boolean(true):new Boolean(false);
+            unique = i!=null&&i==1;
         }
-
+        
         String name = (String)options.get("name");
-        if(unique!=null&&unique.booleanValue()) {
-            if (!keys.containsField(Fields.UNIQUE_)) {
-                keys.put(Fields.UNIQUE_, 1);
+        if(unique!=null&&unique) {
+            //如果是创建一个唯一键，则需要判断：
+            //是否已经存在keys需求的唯一键了
+            //如果满足，则检查是否包含Fields.UNIQUE_，如果不包含，则重新创建
+            //如果不满足，则加上Fields.UNIQUE_后创建
+            List<DBObject> indices = this.getIndexInfo();
+            boolean matchInDB = false;
+            boolean needmodify = false;
+            DBObject keyInDB = null;
+            for(DBObject index : indices) {
+                //寻找已经存在的唯一键
+                keyInDB = (DBObject) index.get("key");
+                String nameInDB = (String)index.get("name");
+                //获取唯一键
+                Boolean uniqueInDB = (Boolean) index.get("unique");
+                if (uniqueInDB != null && uniqueInDB){
+                    boolean containsUnqiue = keyInDB.containsField(Fields.UNIQUE_);
+                    if(containsUnqiue){
+                        keyInDB.removeField(Fields.UNIQUE_);
+                    }
+                    if(CollectionUtils.isEqualCollection(keys.keySet(), keyInDB.keySet())) {
+                        //如果已经存在这个唯一键，并且不需要modify，则退出了
+                        matchInDB = true;
+                        needmodify = !containsUnqiue;
+                        name = nameInDB;
+                        break;
+                    }
+                }
             }
-            options.put("background", 1);
-
-            super.createIndex(keys, options);
-
-            //如果是创建了新索引，那么也徐亚记录下来
-            //但是要建立成功才记录
-            List<String> uniqueFieldsInIndex = uniqueIndiceFields.get(name);
-            if(uniqueFieldsInIndex==null){
-                uniqueFieldsInIndex = new ArrayList<String>();
-                uniqueIndiceFields.put(name, uniqueFieldsInIndex);
+            //要是上面没有退出，则说明需要创建或更新唯一键
+            if(!matchInDB){
+                //首要的判断是是否已经存在，如果不存在则新建
+                createUniquIndexWithUniqueField(name, keys);
+            }else if(needmodify){
+                //如果存在，就看是否需要刷新。如果又存在又不需要刷新，则任何事情都不做
+                super.dropIndex(name);//此处肯定存在，不会报错
+                createUniquIndexWithUniqueField(name, keyInDB);
             }
-
-            for(Iterator<String> itr = keys.keySet().iterator();
-                itr.hasNext();){
-                String field = itr.next();
-                uniqueFieldsInIndex.add(field);
-            }
-            uniqueFieldsInIndex.add(Fields.UNIQUE_);
         }else{
             super.createIndex(keys, options);
         }
     }
-
 
     private void refreshUniqueFields(List<DBObject> indices){
         for(DBObject index : indices) {
@@ -308,31 +324,37 @@ public class SidistranDBCollection extends DBCollection {
             //获取唯一键。在获取快照的时候需要使用
             Boolean unique = (Boolean) index.get("unique");
             String name = (String)index.get("name");
-            if (unique != null && unique.booleanValue()) {
-                List<String> uniqueFieldsInIndex = uniqueIndiceFields.get(name);
-                if(uniqueFieldsInIndex==null){
-                    uniqueFieldsInIndex = new ArrayList<String>();
-                    uniqueIndiceFields.put(name, uniqueFieldsInIndex);
-                }
-
-                BasicDBObject temp = new BasicDBObject();
-                for (Iterator<String> itr_ = key.keySet().iterator();
-                     itr_.hasNext(); ) {
-                    String uniqueField = itr_.next();
-                    temp.put(uniqueField, 1);
-                    uniqueFieldsInIndex.add(uniqueField);
-                }
-
+            if (unique != null && unique) {
                 if(!key.containsField(Fields.UNIQUE_)){
-                    //如果唯一键里面不包含这个辅助字段，则加上
-                    temp.put(Fields.UNIQUE_, 1);
-                    this.dropIndex(index.get("name").toString());
-                    this.createIndex(temp,
-                        new BasicDBObject("unique", 1).append("name", name).append("background", 1));
-                    uniqueFieldsInIndex.add(Fields.UNIQUE_);
+                    super.dropIndex(name);
                 }
+                createUniquIndexWithUniqueField(name, key);
             }
         }
+    }
+
+    private void createUniquIndexWithUniqueField(String indexName, DBObject indexKeys){
+        List<String> uniqueFieldsInIndex = uniqueIndiceFields.get(indexName);
+        if(uniqueFieldsInIndex==null){
+            uniqueFieldsInIndex = new ArrayList<String>();
+            uniqueIndiceFields.put(indexName, uniqueFieldsInIndex);
+        }
+
+        BasicDBObject temp = new BasicDBObject();
+        for (Iterator<String> itr_ = indexKeys.keySet().iterator();
+             itr_.hasNext(); ) {
+            String uniqueField = itr_.next();
+            temp.put(uniqueField, 1);
+            uniqueFieldsInIndex.add(uniqueField);
+        }
+
+        if(!indexKeys.containsField(Fields.UNIQUE_)) {
+            //如果唯一键里面不包含这个辅助字段，则加上
+            temp.put(Fields.UNIQUE_, 1);
+        }
+        super.createIndex(temp,
+            new BasicDBObject("unique", 1).append("name", indexName).append("background", 1));
+        uniqueFieldsInIndex.add(Fields.UNIQUE_);
     }
     //endregion
 
@@ -393,7 +415,7 @@ public class SidistranDBCollection extends DBCollection {
             return super.insert(documents, insertOptions);
         }catch (Exception e){
             if(MongoTanscationManager.hasTransaction()){
-                MongoTanscationManager.current().onError(e);
+                MongoTanscationManager.transactionOnError(e);
             }
             throw e;
         }
@@ -413,7 +435,7 @@ public class SidistranDBCollection extends DBCollection {
         } else {
             //sidistran的表，id在返回的时候，都转换成了__s_._id
             DBObject filter = new BasicDBObject(id_f, id);
-            return this.update(filter, document, true, false, writeConcern);
+            return this.update(filter, document, true, false, writeConcern, null);
         }
     }
     //endregion
@@ -443,7 +465,7 @@ public class SidistranDBCollection extends DBCollection {
                     writeConcern, encoder, UpdateType.REMOVE);
                 return result;
             } catch (Exception e) {
-                MongoTanscationManager.current().onError(e);
+                MongoTanscationManager.transactionOnError(e);
                 throw e;
             }
         } else {
@@ -567,15 +589,20 @@ public class SidistranDBCollection extends DBCollection {
     }
 
     private WriteResult update(DBObject query, DBObject update, boolean upsert, boolean multi,
-                               WriteConcern aWriteConcern, DBEncoder encoder, UpdateType updateType) {
+                              WriteConcern aWriteConcern, DBEncoder encoder, UpdateType updateType) {
         WriteResult result = null;
         try {
             //readWriteLock.readLock().lock();
             if (query instanceof CommitDBQuery) {
                 return super.update(query, update, upsert, multi, aWriteConcern, encoder);
             } else if (MongoTanscationManager.hasTransaction()) {
+                MongoTanscationManager.current().addTransactionTargetIfAbsent(this);
                 if (logger.isDebugEnabled()) {
-                    logger.debug("SidistranDBCollection.事务环境下." + (updateType == UpdateType.REMOVE ? "remove" : "update"));
+                    logger.debug(
+                        "【sidistran_mongo_dbcollection】【事务环境】" +
+                        (updateType == UpdateType.REMOVE ? "remove" : "update")+
+                         ", 条件为："+query+", update："+update+", tx="+MongoTanscationManager.current()
+                    );
                 }
 
                 long txid = MongoTanscationManager.txid_AtThisContext();
@@ -596,7 +623,8 @@ public class SidistranDBCollection extends DBCollection {
                 if (findCount > 0) {
                     long time = System.currentTimeMillis();
                     if (logger.isDebugEnabled()) {
-                        logger.debug("SidistranDBCollection在事务环境下update，开始获取快照，快照数量：" + findCount);
+                        logger.debug("【sidistran_mongo_dbcollection】【事务环境】update，开始获取快照，快照数量：" + findCount
+                            +", tx="+MongoTanscationManager.current());
                     }
                     List<DBObject> list = new ArrayList<>();
                     while (cursor.hasNext()) {
@@ -610,12 +638,9 @@ public class SidistranDBCollection extends DBCollection {
                         if (body.get(Fields.UPDATEBY_TXID_NAME) != null) {
                             long locker = (long) body.get(Fields.UPDATEBY_TXID_NAME);
                             if (locker != txid && locker != -1l) {
-                                try {
-                                    throw new SidistranMongoCuccrentException("could not serialize access due to concurrent update." +
-                                        " cur.txid=" + txid + " , _id=" + dbObject.get("_id") + ", locker=" + body.get(Fields.UPDATEBY_TXID_NAME));
-                                } finally {
-                                    proRollback(encoder);
-                                }
+                                proRollback(encoder);
+                                throw new SidistranMongoCuccrentException("could not serialize access due to concurrent update." +
+                                    " cur.txid=" + txid + " , _id=" + dbObject.get("_id") + ", locker=" + body.get(Fields.UPDATEBY_TXID_NAME));
                             }
                         }
 
@@ -644,7 +669,6 @@ public class SidistranDBCollection extends DBCollection {
 
                     //开始竞争update资源
                     boolean win = false;
-                    int turn = 1;
                     long lastCount = 0;
                     //每个update事务，都要去竞争目标资源
                     //修改目标资源的u_txid为当前事务。
@@ -656,7 +680,8 @@ public class SidistranDBCollection extends DBCollection {
                         if(win){
                             break;
                         }else{
-                            if(turn==1&&wr.getN()==0){ //第一轮就没竞争到就输
+                            if(wr.getN()==0){ //第一轮就没竞争到就输
+                                proRollback(encoder); //放弃抢占的资源
                                 throw new SidistranMongoCuccrentException("could not serialize access due to concurrent update." +
                                     " cur.txid=" + txid);
                             }else if(
@@ -667,12 +692,14 @@ public class SidistranDBCollection extends DBCollection {
                                 proRollback(encoder); //放弃抢占的资源
                                 throw new SidistranMongoCuccrentException("could not serialize access due to concurrent update." +
                                     " cur.txid=" + txid);
-                            }else{
-                                //只有赢家会胜出
-                                lastCount += wr.getN();
                             }
+                            //只有赢家会胜出
+                            lastCount += wr.getN();
                         }
-                        turn++;
+                    }
+
+                    if (logger.isDebugEnabled()) {
+                        logger.debug("【sidistran_mongo_dbcollection】【在事务环境】update即将写入快照:"+ list.size()+ ", tx="+MongoTanscationManager.current());
                     }
 
                     //复制快照数据
@@ -683,7 +710,7 @@ public class SidistranDBCollection extends DBCollection {
                     }
 
                     if (logger.isDebugEnabled()) {
-                        logger.debug("SidistranDBCollection在事务环境下update，快照处理完成，time=" + (System.currentTimeMillis() - time));
+                        logger.debug("【sidistran_mongo_dbcollection】在事务环境下update，快照处理完成，time=" + (System.currentTimeMillis() - time));
                     }
                 }
 
@@ -692,11 +719,17 @@ public class SidistranDBCollection extends DBCollection {
                 //这里需要的是对remove的处理。如果是当前事务中的insert数据、update数据，直接用原始请求更新即可
                 if (updateType == UpdateType.REMOVE) {
                     update = this.getRemoveUpdateObj();
+                    if (logger.isDebugEnabled()) {
+                        logger.debug("【sidistran_mongo_dbcollection】事务环境下remove, 转换的update="+update);
+                    }
                 } else {
                     //对update进行处理，如果里面包含唯一键的字段，则需要把Fields.UNIQUE_去掉，如果出现报错，说明唯一键冲突
                     uniqueIndexFieldProcess(update, true);
+                    if (logger.isDebugEnabled()) {
+                        logger.debug("【sidistran_mongo_dbcollection】事务环境下update, 转换的update="+update);
+                    }
                 }
-                MongoTanscationManager.current().addTransactionTargetIfAbsent(this);
+
                 result = super.update(query, update, upsert, multi, aWriteConcern, encoder);
                 return result;
             } else {
@@ -713,22 +746,58 @@ public class SidistranDBCollection extends DBCollection {
                 //普通情况下，直接执行
                 commonQueryAdapt(query);
                 uniqueIndexFieldProcess(update, false);
+                if (logger.isDebugEnabled()) {
+                    logger.debug("【sidistran_mongo_dbcollection】非事务环境update, 转换的update="+update);
+                }
                 result = super.update(query, update, upsert, multi, aWriteConcern, encoder);
                 return result;
             }
         } catch (Exception e) {
             if (MongoTanscationManager.hasTransaction()) {
-                MongoTanscationManager.current().onError(e);
+                MongoTanscationManager.transactionOnError(e);
             }
             throw e;
         } finally {
             //readWriteLock.readLock().unlock();
             if(result!=null&&result.getUpsertedId()!=null){
-                super.findAndModify(
-                    new BasicDBObject(ID_FIELD_NAME, result.getUpsertedId()),
-                    null, null, false,
-                    new BasicDBObject("$set", new BasicDBObject(id_f, result.getUpsertedId())),
-                    false, false, WriteConcern.ACKNOWLEDGED);
+                try {
+                    super.findAndModify(
+                            new BasicDBObject(ID_FIELD_NAME, result.getUpsertedId()),
+                            null, null, false,
+                            new BasicDBObject("$set", new BasicDBObject(id_f, result.getUpsertedId())),
+                            false, false, WriteConcern.ACKNOWLEDGED);
+                }catch (MongoCommandException e){
+                    if(e.getCode()==61){
+                        String shardKey = CollectionListConfiger.getShardKey(this.getDB().getName(), this.getName());
+                        if (StringUtils.isEmpty(shardKey)) {
+                            throw new UnsupportedOperationException("Sidistran环境下进行__s_id补录，当前Collection["
+                                    +this.getName()+"]的ShardKey的没有在sidistran_collections.properties中配置");
+                        }
+                        String[] keys = shardKey.split("\\.");
+                        Object value = update.get(keys[0]);
+                        if(value!=null){
+                            for(int i=1; i<keys.length; i++){
+                                if(value!=null&&value instanceof DBObject) {
+                                    value = ((DBObject)value).get(keys[i]);
+                                }
+                            }
+                        }
+                        if(value==null){
+                            throw new UnsupportedOperationException("当前Collection["+this.getName()
+                                    +"]的ShardKey["+shardKey+"]的值为空");
+                        }
+//                        super.findAndModify(
+//                            new BasicDBObject(shardKey, value),
+//                            null, null, false,
+//                            new BasicDBObject("$set", new BasicDBObject(id_f, oid)),
+//                            false, false, WriteConcern.ACKNOWLEDGED);
+                        super.findAndModify(
+                                new BasicDBObject(shardKey, value),
+                                null, null, false,
+                                new BasicDBObject("$set", new BasicDBObject(id_f, result.getUpsertedId())),
+                                false, false, WriteConcern.ACKNOWLEDGED);
+                    }
+                }
             }
         }
     }
@@ -810,6 +879,7 @@ public class SidistranDBCollection extends DBCollection {
                                     boolean  remove,DBObject update, boolean upsert){
         projectionAdapt(fields);
         if (MongoTanscationManager.hasTransaction()) {
+            MongoTanscationManager.current().addTransactionTargetIfAbsent(this);
             //事务可见性处理
             sidistranQueryAdapt(query);
 
@@ -842,7 +912,6 @@ public class SidistranDBCollection extends DBCollection {
 
             //对update进行处理，如果里面包含唯一键的字段，则需要把Fields.UNIQUE_去掉，如果出现报错，说明唯一键冲突
             uniqueIndexFieldProcess(update, true);
-            MongoTanscationManager.current().addTransactionTargetIfAbsent(this);
         } else {
             commonQueryAdapt(query);
             uniqueIndexFieldProcess(update, false);
@@ -921,30 +990,34 @@ public class SidistranDBCollection extends DBCollection {
                         new BasicDBObject("$set", new BasicDBObject(id_f, oid)),
                         false, false, WriteConcern.ACKNOWLEDGED);
                 }catch (MongoCommandException e){
-                    if(e.getCode()==61){
-                        String shardKey = CollectionListConfiger.getShardKey(this.getDB().getName(), this.getName());
-                        if (StringUtils.isEmpty(shardKey)) {
-                            throw new UnsupportedOperationException("Sidistran环境下进行__s_id补录，当前Collection["
-                                +this.getName()+"]的ShardKey的没有在sidistran_collections.properties中配置");
-                        }
-                        String[] keys = shardKey.split("\\.");
-                        Object value = object.get(keys[0]);
-                        if(value!=null){
-                            for(int i=1; i<keys.length; i++){
-                                if(value!=null&&value instanceof DBObject) {
-                                    value = ((DBObject)value).get(keys[i]);
+                    try{
+                        if(e.getCode()==61){
+                            String shardKey = CollectionListConfiger.getShardKey(this.getDB().getName(), this.getName());
+                            if (StringUtils.isEmpty(shardKey)) {
+                                throw new UnsupportedOperationException("Sidistran环境下进行__s_id补录，当前Collection["
+                                        +this.getName()+"]的ShardKey的没有在sidistran_collections.properties中配置");
+                            }
+                            String[] keys = shardKey.split("\\.");
+                            Object value = object.get(keys[0]);
+                            if(value!=null){
+                                for(int i=1; i<keys.length; i++){
+                                    if(value!=null&&value instanceof DBObject) {
+                                        value = ((DBObject)value).get(keys[i]);
+                                    }
                                 }
                             }
+                            if(value==null){
+                                throw new UnsupportedOperationException("当前Collection["+this.getName()
+                                        +"]的ShardKey["+shardKey+"]的值为空");
+                            }
+                            super.findAndModify(
+                                    new BasicDBObject(shardKey, value),
+                                    null, null, false,
+                                    new BasicDBObject("$set", new BasicDBObject(id_f, oid)),
+                                    false, false, WriteConcern.ACKNOWLEDGED);
                         }
-                        if(value==null){
-                            throw new UnsupportedOperationException("当前Collection["+this.getName()
-                                +"]的ShardKey["+shardKey+"]的值为空");
-                        }
-                        super.findAndModify(
-                            new BasicDBObject(shardKey, value),
-                            null, null, false,
-                            new BasicDBObject("$set", new BasicDBObject(id_f, oid)),
-                            false, false, WriteConcern.ACKNOWLEDGED);
+                    } catch (Exception ee){
+                        if(logger.isWarnEnabled()) logger.warn("补录历史数据的__s_id失败:" + ee.getMessage());
                     }
                 }
             }
@@ -967,13 +1040,13 @@ public class SidistranDBCollection extends DBCollection {
      */
     private void commonQueryAdapt(DBObject query){
         if(logger.isDebugEnabled()){
-            logger.debug("SidistranDBCollection【非事务】环境原始请求：" + query);
+            logger.debug("【sidistran_mongo_dbcollection】【非事务】环境原始请求：" + query);
         }
         DBObject con = new BasicDBObject(stat_f, Values.COMMITED_STAT)
-            .append(db_time_f, Long.MAX_VALUE);
+    .append(db_time_f, Long.MAX_VALUE);
         queryAdapt(query, con);
         if(logger.isDebugEnabled()){
-            logger.debug("SidistranDBCollection【非事务】环境处理后请求："+query);
+            logger.debug("【sidistran_mongo_dbcollection】【非事务】环境处理后请求："+query);
         }
     }
 
@@ -1028,7 +1101,7 @@ public class SidistranDBCollection extends DBCollection {
      */
     private void sidistranQueryAdapt(DBObject query){
         if(logger.isDebugEnabled()){
-            logger.debug("SidistranDBCollection在【事务环境】下原始请求：" + query);
+            logger.debug("【sidistran_mongo_dbcollection】【事务环境】下原始请求：" + query);
         }
         long txid = MongoTanscationManager.txid_AtThisContext();
         long time = MongoTanscationManager.current().getTx_time();
@@ -1036,9 +1109,9 @@ public class SidistranDBCollection extends DBCollection {
         DBObject con = new BasicDBObject()
             .append("$or", new BasicDBObject[]{
                 new BasicDBObject(stat_f, Values.COMMITED_STAT)
-                    .append(txid_f, new BasicDBObject(QueryOperators.LT, txid))
-                    .append(u_by_f, new BasicDBObject(QueryOperators.NE, txid))
-                    .append(db_time_f, new BasicDBObject(QueryOperators.GT, time))
+                          .append(txid_f, new BasicDBObject(QueryOperators.LT, txid))
+                          .append(u_by_f, new BasicDBObject(QueryOperators.NE, txid))
+                          .append(db_time_f, new BasicDBObject(QueryOperators.GT, time))
                 ,
                 new BasicDBObject(txid_f, txid).append(stat_f, Values.INSERT_NEW_STAT)
             });
@@ -1046,7 +1119,7 @@ public class SidistranDBCollection extends DBCollection {
         queryAdapt(query, con);
 
         if(logger.isDebugEnabled()){
-            logger.debug("SidistranDBCollection在【事务环境】下处理之后的请求："+query);
+            logger.debug("【sidistran_mongo_dbcollection】【事务环境】下处理之后的请求："+query);
         }
     }
 
@@ -1110,7 +1183,7 @@ public class SidistranDBCollection extends DBCollection {
      *
      * $and: [
      *        {
-     *          __s_.__s_stat: 2, __s_.__s_c_txid:{$lt: cur.txid},__s_.__s_u_txid:-1l}
+     *          __s_.__s_stat: 2, __s_.__s_c_txid:{$lt: cur.txid},__s_.__s_u_txid:{$ne:cur.txid},__s_.__s_c_time:{$gt:cur.time},__s_.__s_u_txid:-1l}
      *        }
      * ]
      *
@@ -1118,11 +1191,14 @@ public class SidistranDBCollection extends DBCollection {
      */
     private void findCommonDataQuery_OnSidistranUpdate(DBObject query){
         long txid = MongoTanscationManager.txid_AtThisContext();
+        long time = MongoTanscationManager.current().getTx_time();
 
         DBObject con = new BasicDBObject(stat_f, Values.COMMITED_STAT)
-            .append(txid_f, new BasicDBObject(QueryOperators.LT, txid))
-            .append(u_by_f, -1l);
-        //.append(db_time_f, new BasicDBObject(QueryOperators.EXISTS, false));
+                    .append(txid_f, new BasicDBObject(QueryOperators.LT, txid))
+                    .append(u_by_f, new BasicDBObject(QueryOperators.NE, txid))
+                    .append(db_time_f, new BasicDBObject(QueryOperators.GT, time))
+                    .append(u_by_f, -1l);
+
         queryAdapt(query, con);
     }
 
@@ -1149,7 +1225,7 @@ public class SidistranDBCollection extends DBCollection {
                 if(and instanceof BasicDBList){
                     boolean find = false;
                     for(Iterator itr = ((BasicDBList)and).iterator();
-                        itr.hasNext();){
+                            itr.hasNext();){
                         Object o = itr.next();
                         if((o instanceof DBObject)&&o.equals(con)) {
                             find = true;
@@ -1171,7 +1247,7 @@ public class SidistranDBCollection extends DBCollection {
     @Deprecated
     private void updateOr(Object[] or, BasicDBObject con){
         for(Object o1 : or){
-            if (o1 instanceof Map){
+             if (o1 instanceof Map){
                 Map o = (Map)o1;
                 if(o.containsKey("$and")){
                     Object[] and = (Object[])o.get("$and");
@@ -1203,18 +1279,32 @@ public class SidistranDBCollection extends DBCollection {
 
     /**
      * 处理查询返回结果，过滤掉version控制字段
+     *
+     * 这个方法的作用是：
+     * 判断projection中是否指定了“要返回”的字段
+     * 如果指定了，就不用再处理了。
+     *
+     * 如果指定了，但是指定的是“不返回”某些字段
+     * 则需要把version控制字段给加入到“不返回”列表中
+     *
      * @param projection
      */
     private void projectionAdapt(DBObject projection){
         if(projection.keySet().size()>0){
-            String key = projection.keySet().iterator().next();
-            Object val = projection.get(key);
-            if(((val instanceof Boolean)&&((Boolean)val).booleanValue())
-                ||((val instanceof Number)&&((Number)val).intValue()==1)){
-                return;
+            //2016-10-17 wx 所有projection都会默认放回_id,因此，这里判断的时候需要把_id给排除
+            for(Iterator<String> itr = projection.keySet().iterator();
+                itr.hasNext();){
+                String key = itr.next();
+                if(!key.equals(ID_FIELD_NAME)){
+                    Object val = projection.get(key);
+                    if(((val instanceof Boolean)&&(Boolean)val)
+                        ||((val instanceof Number)&&((Number)val).intValue()==1)){
+                        return;
+                    }
+                }
             }
         }
-
+        
         if(!projection.containsField(stat_f)){
             projection.put(stat_f, false);
         }
@@ -1316,7 +1406,7 @@ public class SidistranDBCollection extends DBCollection {
                     itr.hasNext();){
                     Object o = itr.next();
                     if(o instanceof DBObject) {
-                        sidistranQueryIDProcess((DBObject) itr.next());
+                        sidistranQueryIDProcess((DBObject) o);
                     }
                 }
             }
@@ -1351,7 +1441,7 @@ public class SidistranDBCollection extends DBCollection {
      * $min	        Only updates the field if the specified value is less than the existing field value.
      * $max         Only updates the field if the specified value is greater than the existing field value.
      * $currentDate	Sets the value of a field to current date, either as a Date or a Timestamp.
-     *
+     * 
      * $addToSet	Adds elements to an array only if they do not already exist in the set.
      * $pop	        Removes the first or last item of an array.
      * $pullAll	    Removes all matching values from an array.
@@ -1365,13 +1455,13 @@ public class SidistranDBCollection extends DBCollection {
      */
     private void uniqueIndexFieldProcess(DBObject update, boolean sidistran){
         if(logger.isDebugEnabled()){
-            logger.debug("SidistranDBCollection在事务环境下update，检测update是否需要处理唯一键字段\n, 当前update为:" + update);
+            logger.debug("【sidistran_mongo_dbcollection】事务环境下update，检测update是否需要处理唯一键字段\n, 当前update为:" + update);
         }
 
         boolean updateOP = false;
         //要么是update操作符
         out:for(Iterator<String> itr = update.keySet().iterator();
-                itr.hasNext();){
+            itr.hasNext();){
             String key = itr.next();
             if(ops.contains(key)){
                 updateOP = true;
@@ -1490,7 +1580,7 @@ public class SidistranDBCollection extends DBCollection {
             new BasicDBObject(
                 "$set",
                 new BasicDBObject(stat_f, Values.NEED_TO_REMOVE)
-                    .append(Fields.UNIQUE_, UUID.randomUUID().toString()) //避免出现垃圾数据的唯一键冲突
+                .append(Fields.UNIQUE_, UUID.randomUUID().toString()) //避免出现垃圾数据的唯一键冲突
             ),
             false, true, WriteConcern.ACKNOWLEDGED, dbEncoder
         );

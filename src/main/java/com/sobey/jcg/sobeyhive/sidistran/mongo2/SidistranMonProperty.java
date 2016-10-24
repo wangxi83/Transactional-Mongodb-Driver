@@ -19,7 +19,6 @@ import com.mongodb.util.JSON;
 
 /**
  * Created by WX on 2016/2/23.
- *
  */
 public class SidistranMonProperty {
     private String description;

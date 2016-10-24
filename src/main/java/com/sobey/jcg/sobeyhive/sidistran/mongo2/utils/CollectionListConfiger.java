@@ -10,6 +10,8 @@ import java.util.Map.Entry;
 import java.util.Properties;
 import java.util.regex.Pattern;
 
+import com.sobey.jcg.sobeyhive.sidistran.commons.Util;
+
 /**
  * Created by WX on 2016/2/17.
  */
@@ -31,7 +33,7 @@ public final class CollectionListConfiger {
     private CollectionListConfiger(String a){
         try {
             Properties properties = new Properties();
-            properties.load(Thread.currentThread().getContextClassLoader().getResourceAsStream("sidistran_collections.properties"));
+            properties.load(Util.getDefaultClassLoader().getResourceAsStream("sidistran_collections.properties"));
 
             for(Iterator<Entry<Object, Object>> itr = properties.entrySet().iterator();
                 itr.hasNext();){

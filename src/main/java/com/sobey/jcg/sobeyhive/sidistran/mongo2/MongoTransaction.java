@@ -6,6 +6,10 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
+import org.apache.commons.lang.exception.ExceptionUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import com.mongodb.BasicDBObject;
 import com.mongodb.DBCollection;
 import com.mongodb.DBObject;
@@ -20,6 +24,8 @@ import com.sobey.jcg.sobeyhive.sidistran.mongo2.Constants.Values;
  * mongodb事务对象
  */
 public class MongoTransaction{
+    private Logger logger = LoggerFactory.getLogger(MongoTanscationManager.class);
+
     protected String stat_f = Fields.ADDITIONAL_BODY+"."+Fields.STAT_FILED_NAME;
     protected String txid_f = Fields.ADDITIONAL_BODY+"."+Fields.TXID_FILED_NAME;
     protected String ufrom_f = Fields.ADDITIONAL_BODY+"."+Fields.UPDATE_FROM_NAME;
@@ -69,7 +75,7 @@ public class MongoTransaction{
     }
 
     protected void onError(Throwable e){
-        e.printStackTrace();
+        logger.error("【sidistran_mongo_transaction】onError: "+ ExceptionUtils.getRootCauseMessage(e), e);
         this.rollback();
     }
 
@@ -79,6 +85,9 @@ public class MongoTransaction{
             throw new IllegalStateException("已经回滚，不能提交");
         }
 
+        if(logger.isDebugEnabled()){
+            logger.debug("【sidistran_mongo_transaction】提交. tx="+this.toString());
+        }
             //@see MongoReadWriteLock
 //            MongoReadWriteLock lock = MongoReadWriteLock.getLock(mongoClient);
         long maxtxid = MonTxIDManager.getFrom(real_client).toggleMaxTxID(txid);
@@ -143,6 +152,9 @@ public class MongoTransaction{
             txClt.remove(new BasicDBObject("_id", txid));
         }
         committed = true;
+        if(logger.isDebugEnabled()){
+            logger.debug("【sidistran_mongo_transaction】提交完成. tx="+this.toString());
+        }
     }
 
 
@@ -151,6 +163,11 @@ public class MongoTransaction{
         if(committed){
             throw new IllegalStateException("已经提交，不能回滚");
         }
+
+        if(logger.isDebugEnabled()){
+            logger.debug("【sidistran_mongo_transaction】回滚. tx="+this.toString());
+        }
+
         try{
             if(!collections.isEmpty()){
                 //把当前事务可见的那些临时数据，设置为需要删除
@@ -175,5 +192,13 @@ public class MongoTransaction{
             txClt.remove(new BasicDBObject("_id", txid));
         }
         rollbacked = true;
+        if(logger.isDebugEnabled()){
+            logger.debug("【sidistran_mongo_transaction】回滚完成. tx="+this.toString());
+        }
+    }
+
+    @Override
+    public String toString() {
+        return "{tixd=("+txid+"), dbtime=("+tx_time+")}";
     }
 }

@@ -12,9 +12,9 @@ import com.mongodb.DefaultDBDecoder;
 import com.mongodb.DefaultDBEncoder;
 import com.mongodb.Mongo;
 import com.mongodb.WriteConcern;
+import com.sobey.jcg.sobeyhive.sidistran.commons.MethodNameUtil;
 import com.sobey.jcg.sobeyhive.sidistran.mongo2.ex.SidistranMongoException;
 import com.sobey.jcg.sobeyhive.sidistran.mongo2.utils.CollectionListConfiger;
-import com.sobey.jcg.sobeyhive.sidistran.mongo2.utils.MethodNameUtil;
 import net.sf.cglib.proxy.Enhancer;
 import net.sf.cglib.proxy.MethodInterceptor;
 import net.sf.cglib.proxy.MethodProxy;
@@ -64,7 +64,7 @@ public class SidistranMongoDB implements MethodInterceptor{
         return db;
     }
 
-
+    @Override
     public Object intercept(Object o, Method method, Object[] args,
                             MethodProxy methodProxy) throws Throwable {
         //返回代理后的DBCollection
@@ -75,7 +75,6 @@ public class SidistranMongoDB implements MethodInterceptor{
 
         return methodProxy.invokeSuper(o, args);
     }
-    
     private static String methodName1 = "getCollection(java.lang.String)";
     private static String methodName2 = "getCollectionFromString(java.lang.String)";
     public DBCollection getCollection(DB db, String name) {
